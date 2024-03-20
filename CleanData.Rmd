@@ -1,0 +1,3498 @@
+---
+title: "Data cleaning"
+subtitle: ""
+author: "Mathilde Josserand [mathilde.josserand@gmail.fr]"
+date: "`r date()`"
+output:
+  html_document: 
+    highlight: textmate
+    toc: true
+    toc_depth: 6
+    toc_float: yes
+    theme: cerulean
+    number_sections: no
+  word_document: default
+  pdf_document:
+    toc: yes
+    toc_depth: '6'
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE }
+
+# Upload libraries
+library(data.table)
+library(ggplot2)
+library(tidyr)
+require(data.table)
+library(stringi)
+require(gridExtra)
+library(caret)
+library(heatmaply)
+library(dplyr)
+library(tidyverse)
+library(entropy)
+library(car)
+library(corrplot)
+
+# Function for density plots
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+# Write path with all files 
+path = "C:/Users/Mathilde JOSSERAND/Desktop/Brussels/FINAL/Inputfiles/"
+
+# Name of output files
+pathfileout <- '.csv'
+pathfile_output <- paste(path, "whatever", sep="")
+
+
+preprocess_vector <- function(df){
+  # preprocess the "vector" column to get something readable by R
+  
+  # create empty dataframe
+  df_all <- data.frame(matrix(0, ncol = 4, nrow = 0))
+  colnames(df_all) <- c("person", "rep_id", "condition", "measurement")
+  
+  # then check for each size
+  for (size in unique(df$size_net)){
+    #print(paste("Size:", size))
+    
+    # create a dataframe with only the desired size
+    df_bis <- df[df$size_net==size ,]
+    df_bis <- df_bis[order(df_bis),]
+  
+    # number of people in the network, -1, because it starts with zero
+    nb_people = size - 1
+    
+    # create a dataframe with only the data from vector
+    df_indiv <- data.frame(df_bis$vector)
+    
+    # store the name of this dataframe
+    cols <- names(df_indiv)
+    
+    # remove useless characters and split by individuals
+    df_indiv2 <- data.frame(do.call('rbind', strsplit(as.character(df_indiv$df_bis.vector),'] [',fixed=TRUE)))
+    
+    # change the name of the columns (useless actually but useful for me to double check its ok)
+    colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+    colnames(df_indiv2) <- colna
+  
+    # now we have row for each person, we want to get the data for each utterance
+    # in this program, utterances are called "condition"
+    
+    # for each individual
+    for (mycol in c(1:ncol(df_indiv2))) {
+  
+      # subset the dataframe just for this individual
+      subdf <- data.frame(df_indiv2[,c(mycol)])
+      
+      # remove useless characters
+      subdf[,1] <- gsub("\\[|\\]", "", subdf[,1])
+      
+      # write it to csv using a space as separator
+      write.table(subdf, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+      
+      # read it using space as separator
+      # (it is a bit silly to do like that but could not find an easier way!)
+      subdf <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+      subdf <- data.frame(subdf)
+      
+      # remove all non numeric characters
+      #subdf <- subdf[, c(as.numeric(which(is.na(colSums(subdf != ""))==FALSE)))]
+      
+      # reformat this dataframe to be easier to use
+      subdf$person <- mycol
+      subdf$rep_id <- df_bis$rep_id
+      subdf_gat <- gather(subdf, condition, measurement, c(1:(ncol(subdf)-2)))
+      subdf_gat <- subdf_gat[, c("person", "rep_id", "condition", "measurement")]
+      subdf_gat$measurement <- gsub("[^0-9.-]", "", subdf_gat$measurement)
+      
+      # bind it, so this df_all gathers the information for all individuals, for all replications
+      df_all <- rbind(df_all, subdf_gat)
+    }
+  }
+  # we obtain a dataframe with the data for each person and each utterance
+  df_all$condition <- gsub("[^0-9.-]", "", df_all$condition)
+  
+  # then we merge this dataframe with the previous one, so we get all information in df_all
+  df_all2 <- merge(df_all, df[,-c("vector")], by=c("rep_id"), all.x=TRUE)
+  
+  # this is the one we want to return:
+  return(df_all2)
+
+}
+
+
+### Compute exponent Clauset
+compute_exponent_clauset <- function(df){
+  
+  # create new dataframe containing the data for each replication
+  newdf <- data.frame(matrix(nrow = 0, ncol = (ncol(df)+1)))
+  colnames(newdf) <- c(colnames(df), "exponent")
+  
+  # for each network size
+  for (size in unique(df$size_net)){
+    print(paste("Size: ", size))
+    
+    # subset the big dataframe
+    subdf <- df[df$size_net==size,]
+    
+    # work separately with the degree column
+    degree <- subdf$degree
+    
+    # remove all non-numeric characters
+    degree <- data.frame(gsub("[^0-9.-]", " ", degree))
+    
+    # split it by space
+    degree <- data.frame(do.call('rbind', strsplit(as.character(degree[,1]),' ',fixed=TRUE)))[,-c(1)]
+    
+    # compute exponent for each replication
+    list_expo <- c()
+    for (row in 1:nrow(degree)){
+      
+      # isolate the replication (here, the row)
+      subrow <- as.numeric(t(degree[row,]))
+      
+      # look at the frequency table
+      subrow2 <- data.frame(table(subrow))
+      subrow2$subrow <- as.numeric(subrow2$subrow)
+      
+      # log it
+      subrow3 <- log(subrow2)
+      
+      # apply linear regression
+      res_reg <- lm(Freq ~ subrow, data=subrow3)
+      
+      # apply formula
+      exponent <- ((-1) * as.numeric(res_reg$coefficients[2])) + 1
+      
+      # add the exponent to a list
+      list_expo <- c(list_expo, exponent)
+    }
+    
+    # once the list of exponent is found, add it to the previous table
+    subdf$exponent <- list_expo
+    
+    # and bind this table to create a big dataframe with all size
+    newdf <- rbind(newdf, subdf)
+  }
+  
+  # remove the previous useless degree column
+  newdf <- subset(newdf, select=-c(degree))
+  
+  # return it
+  return(newdf)
+
+  
+}
+
+### Compute exponent of scale-free distribution
+
+compute_exponent <- function(df){
+  
+  # create new dataframe containing the data for each replication
+  newdf <- data.frame(matrix(nrow = 0, ncol = (ncol(df)+1)))
+  colnames(newdf) <- c(colnames(df), "exponent")
+  
+  # for each network size
+  for (size in unique(df$size_net)){
+    print(paste("Size: ", size))
+    
+    # subset the big dataframe
+    subdf <- df[df$size_net==size,]
+    
+    # work separately with the degree column
+    degree <- subdf$degree
+    
+    # remove all non-numeric characters
+    degree <- data.frame(gsub("[^0-9.-]", " ", degree))
+    
+    # split it by space
+    degree <- data.frame(do.call('rbind', strsplit(as.character(degree[,1]),' ',fixed=TRUE)))[,-c(1)]
+    
+    # compute exponent for each replication
+    list_expo <- c()
+    for (row in 1:nrow(degree)){
+      
+      # isolate the replication (here, the row)
+      subrow <- as.numeric(t(degree[row,]))
+      
+      # look at the frequency table
+      subrow2 <- data.frame(table(subrow))
+      subrow2$subrow <- as.numeric(subrow2$subrow)
+      
+      # log it
+      subrow3 <- log(subrow2)
+      
+      # apply linear regression
+      res_reg <- lm(Freq ~ subrow, data=subrow3)
+      
+      # apply formula
+      exponent <- ((-1) * as.numeric(res_reg$coefficients[2])) + 1
+      
+      # add the exponent to a list
+      list_expo <- c(list_expo, exponent)
+    }
+    
+    # once the list of exponent is found, add it to the previous table
+    subdf$exponent <- list_expo
+    
+    # and bind this table to create a big dataframe with all size
+    newdf <- rbind(newdf, subdf)
+  }
+  
+  # remove the previous useless degree column
+  newdf <- subset(newdf, select=-c(degree))
+  
+  # return it
+  return(newdf)
+
+}
+
+
+# Apply Kullback-Leibler divergence
+apply_KL_divergence <- function(df_all3){
+  
+  # function to compute Kullback-Leibler divergence function (parwairse comparison)
+  myfunc <- function(v1, V2) {
+    nb <- KL.Dirichlet(unlist(v1), unlist(V2), a1=1/10, a2=1/10)
+    return(nb)
+  }
+  
+  # select subset of dataframe, because otherwise it's too long and heavy
+  df_new <- df_all3[,c("rep_id", "condition", "person", "meas_ratio")]
+  
+  # spread condition column
+  df_new %>%
+    spread(condition, meas_ratio) -> df_new2
+  
+  # initialize var
+  dfff <- data.frame(matrix(0, ncol=3, nrow=0))
+  
+  # loop for all replication
+  for (repp in unique(df_new2$rep_id)){
+    print(paste("replication", repp, "out of", length(unique(df_all3$rep_id))))
+  
+    # select only replication id
+    subdf <- df_new2[df_new2$rep_id==repp,]
+  
+    # merge the condition columns into a list
+    subdf$vec <-  do.call(Map, c(f = c, subdf[,c(3:ncol(subdf))]))
+  
+    # select only useful columns
+    subdf <- subdf[, c("person", "vec")]
+  
+    # expand df to have each person talking all the others
+    new_subdf <- expand(subdf,
+                          nesting(person, vec),
+                          nesting(person2 = person, vec2 = vec))
+  
+    # remove when participant is talking to himself
+    new_subdf <- new_subdf[!(new_subdf$person == new_subdf$person2),]
+  
+    # apply the Kullmachin Dirichlet function
+    new_subdf$klb <- mapply(myfunc, new_subdf$vec, new_subdf$vec2)
+  
+    new_subdf %>%
+      dplyr::group_by(person) %>%
+      dplyr::summarise(mean_klb = mean(klb)) -> new_subdf2
+    new_subdf2$rep_id <- repp
+  
+    # add value to the df_all3 big dataframe
+    dfff <- rbind(dfff, new_subdf2)
+  }
+  return(dfff)
+}
+
+
+# Find all inter and intra individual variability measures
+# It takes the existing dataframe and give in output a dataframe with all information
+
+add_all_variability_meas <- function(df_all3, df, dfff){
+  
+  df_all3$condition <- as.numeric(df_all3$condition)
+  
+  # group by replication and person
+  df_all3 %>%
+    mutate(value_lang1 = condition*measurement) %>%
+    dplyr::group_by(rep_id, person) %>%
+    dplyr::summarise(entrop_jef = entropy.Dirichlet(measurement, a=1/10),
+                     entrop_lap = entropy.Dirichlet(measurement, a=1),
+                     sum_meas = sum(measurement),
+                     max_meas = max(measurement),
+                     ratio_first = max(meas_ratio),
+                     value_lang = sum(value_lang1) / sum(measurement),
+                     max_cond = condition[which(measurement == max(measurement))]) -> df_part
+  
+  df_all4 <- merge(df_part, dfff, by=c("person", "rep_id"), all.x=TRUE, all.y=TRUE)
+  
+  # group this by replication only
+  df_all4 %>%
+    dplyr::group_by(rep_id) %>%
+    dplyr::summarise(klb = mean(mean_klb),
+                     mean_entrop_jef = mean(entrop_jef),
+                     std_entrop_jef = sd(entrop_jef),
+                     mean_entrop_lap = mean(entrop_lap),
+                     std_entrop_lap = sd(entrop_lap),
+                     mean_sum_meas = mean(sum_meas),
+                     std_sum_meas = sd(sum_meas),
+                     mean_ratio_first = mean(ratio_first),
+                     std_ratio_first = sd(ratio_first),
+                     mean_value_lang = mean(value_lang),
+                     sd_value_lang = sd(value_lang),
+                     mean_max_cond = mean(max_cond),
+                     sd_max_cond = sd(max_cond)) -> df_part2
+  # note that we computed a lot of variable, but the ones that interest us are only:
+  # - the mean_ratio_first: shows how strong they are biased toward one utterance
+  # - the std_ratio_first: shows if everyone has the same amount of intra variation
+  
+  # group by replication and condition
+  df_all3 %>%
+    mutate(cond_ratio = measurement / sum_meas) %>%
+    dplyr::group_by(condition, rep_id) %>%
+    dplyr::summarise(mean_meas = mean(cond_ratio),
+                     std_meas = sd(cond_ratio)) -> df_cond
+  
+  # group by replication only
+  df_cond %>%
+    dplyr::group_by(rep_id) %>%
+    dplyr::summarise(mean_of_std = mean(std_meas),
+                     std_of_mean = sd(mean_meas)) -> df_cond2
+  
+  # merge tables together
+  df_cond2$rep_id <- as.numeric(df_cond2$rep_id)
+  df_part2$rep_id <- as.numeric(df_part2$rep_id)
+  df_merge1 <- merge(df_part2, df_cond2, by=c("rep_id"), all.x=TRUE, all.y=TRUE)
+  df_merge <- merge(df[,-c("vector")], df_merge1, by=c("rep_id"), all.x=FALSE, all.y=TRUE)
+  return(df_merge)
+}
+
+# in order to store the results in a convenient table to visualize the results, we use the following two functions:
+affect_set_small <- function(smallX, type, list_vary_metrics){
+  
+  if (type=="pathlength"){
+    smallX$path_type = "small"
+    if ("neighbors" %in% list_vary_metrics) { smallX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { smallX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { smallX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { smallX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { smallX$size_type = "unknown" }
+  }
+  if (type=="neighbors"){
+    smallX$neigh_type = "small"
+    if ("pathlength" %in% list_vary_metrics) { smallX$path_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { smallX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { smallX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { smallX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { smallX$size_type = "unknown" }
+  }
+  if (type=="clustering"){
+    smallX$clus_type = "small"
+    if ("pathlength" %in% list_vary_metrics) { smallX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { smallX$neigh_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { smallX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { smallX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { smallX$size_type = "unknown" }
+  }
+  if (type=="assortativity"){
+    smallX$ass_type = "small"
+    if ("pathlength" %in% list_vary_metrics) { smallX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { smallX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { smallX$clus_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { smallX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { smallX$size_type = "unknown" }
+  }
+  if (type=="exponent"){
+    smallX$exp_type = "small"
+    if ("pathlength" %in% list_vary_metrics) { smallX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { smallX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { smallX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { smallX$ass_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { smallX$size_type = "unknown" }
+  }
+  if (type=="size"){
+    smallX$size_type = "small"
+    if ("pathlength" %in% list_vary_metrics) { smallX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { smallX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { smallX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { smallX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { smallX$exp_type = "unknown" }
+  }
+  return(smallX)
+}
+
+affect_set_big<- function(bigX, type, list_vary_metrics){
+  if (type=="pathlength"){
+    bigX$path_type = "big"
+    if ("neighbors" %in% list_vary_metrics) { bigX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { bigX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { bigX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { bigX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { bigX$size_type = "unknown" }
+  }
+  if (type=="neighbors"){
+    bigX$neigh_type = "big"
+    if ("pathlength" %in% list_vary_metrics) { bigX$path_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { bigX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { bigX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { bigX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { bigX$size_type = "unknown" }
+  }
+  if (type=="clustering"){
+    bigX$clus_type = "big"
+    if ("pathlength" %in% list_vary_metrics) { bigX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { bigX$neigh_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { bigX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { bigX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { bigX$size_type = "unknown" }
+  }
+  if (type=="assortativity"){
+    bigX$ass_type = "big"
+    if ("pathlength" %in% list_vary_metrics) { bigX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { bigX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { bigX$clus_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { bigX$exp_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { bigX$size_type = "unknown" }
+  }
+  if (type=="exponent"){
+    bigX$exp_type = "big"
+    if ("pathlength" %in% list_vary_metrics) { bigX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { bigX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { bigX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { bigX$ass_type = "unknown" }
+    if ("size" %in% list_vary_metrics) { bigX$size_type = "unknown" }
+  }
+  if (type=="size"){
+    bigX$size_type = "big"
+    if ("pathlength" %in% list_vary_metrics) { bigX$path_type = "unknown" }
+    if ("neighbors" %in% list_vary_metrics) { bigX$neigh_type = "unknown" }
+    if ("clustering" %in% list_vary_metrics) { bigX$clus_type = "unknown" }
+    if ("assortativity" %in% list_vary_metrics) { bigX$ass_type = "unknown" }
+    if ("exponent" %in% list_vary_metrics) { bigX$exp_type = "unknown" }
+  }
+  return(bigX)
+}
+
+
+create_summary_table <- function(list_vary_metrics, list_all_metrics, df2){
+  
+  # Create empty dataframe that will gather all information
+  df_table <- data.frame(matrix(0, ncol = length(list_vary_metrics)*2, nrow = length(list_all_metrics)))
+ 
+  # find the different conditions based on the content of list_vary_metrics
+  colna <- c()
+  if ("pathlength" %in% list_vary_metrics){
+    colna <- c(colna, "path_small")
+    colna <- c(colna, "path_high")
+  } 
+  if ("neighbors" %in% list_vary_metrics){
+    colna <- c(colna, "neigh_small")
+    colna <- c(colna, "neigh_high")
+  } 
+  if ("clustering" %in% list_vary_metrics){
+    colna <- c(colna, "clus_small")
+    colna <- c(colna, "clus_high")
+  } 
+  if ("assortativity" %in% list_vary_metrics){
+    colna <- c(colna, "ass_small")
+    colna <- c(colna, "ass_high")
+  } 
+  if ("exponent" %in% list_vary_metrics){
+    colna <- c(colna, "exp_small")
+    colna <- c(colna, "exp_high")
+  } 
+  if ("size" %in% list_vary_metrics){
+    colna <- c(colna, "size_small")
+    colna <- c(colna, "size_high")
+  } 
+  
+  # change row and column names of the final table
+  colnames(df_table) <- colna
+  rownames(df_table) <- list_all_metrics
+
+  # affect values to the table
+  if ("pathlength" %in% list_vary_metrics){
+    df_table["pathlength", "path_small"] <- mean(df2$pathlength[df2$path_type=="small" ])
+    df_table["pathlength", "path_high"] <- mean(df2$pathlength[df2$path_type=="big" ])
+    df_table["neighbors", "path_small"] <- mean(df2$neighbors[df2$path_type=="small" ])
+    df_table["neighbors", "path_high"] <-mean(df2$neighbors[df2$path_type=="big"])
+    df_table["clustering", "path_small"] <- mean(df2$clus_coeff[df2$path_type=="small" ])
+    df_table["clustering", "path_high"] <-mean(df2$clus_coeff[df2$path_type=="big" ])
+    df_table["assortativity", "path_small"] <- mean(df2$assortativity[df2$path_type=="small"])
+    df_table["assortativity", "path_high"] <- mean(df2$assortativity[df2$path_type=="big" ])
+    df_table["exponent", "path_small"] <- mean(df2$exponent[df2$path_type=="small"])
+    df_table["exponent", "path_high"] <- mean(df2$exponent[df2$path_type=="big" ])
+    df_table["size", "path_small"] <- mean(df2$size_net[df2$path_type=="small"])
+    df_table["size", "path_high"] <- mean(df2$size_net[df2$path_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_path <- df_table$path_high - df_table$path_small
+  }
+ 
+  if ("neighbors" %in% list_vary_metrics){
+    df_table["pathlength", "neigh_small"] <- mean(df2$pathlength[df2$neigh_type=="small" ])
+    df_table["pathlength", "neigh_high"] <- mean(df2$pathlength[df2$neigh_type=="big" ])
+    df_table["neighbors", "neigh_small"] <-  mean(df2$neighbors[df2$neigh_type=="small" ])
+    df_table["neighbors", "neigh_high"] <-mean(df2$neighbors[df2$neigh_type=="big" ])
+    df_table["clustering", "neigh_small"] <- mean(df2$clus_coeff[df2$neigh_type=="small" ])
+    df_table["clustering", "neigh_high"] <-mean(df2$clus_coeff[df2$neigh_type=="big" ])
+    df_table["assortativity", "neigh_small"] <- mean(df2$assortativity[df2$neigh_type=="small" ])
+    df_table["assortativity", "neigh_high"] <- mean(df2$assortativity[df2$neigh_type=="big" ])
+    df_table["exponent", "neigh_small"] <- mean(df2$exponent[df2$neigh_type=="small"])
+    df_table["exponent", "neigh_high"] <- mean(df2$exponent[df2$neigh_type=="big" ])
+    df_table["size", "neigh_small"] <- mean(df2$size_net[df2$neigh_type=="small" ])
+    df_table["size", "neigh_high"] <- mean(df2$size_net[df2$neigh_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_neigh <- df_table$neigh_high - df_table$neigh_small
+  }
+  
+  if ("clustering" %in% list_vary_metrics){
+    df_table["pathlength", "clus_small"] <- mean(df2$pathlength[df2$clus_type=="small" ])
+    df_table["pathlength", "clus_high"] <- mean(df2$pathlength[df2$clus_type=="big" ])
+    df_table["neighbors", "clus_small"] <-  mean(df2$neighbors[df2$clus_type=="small" ])
+    df_table["neighbors", "clus_high"] <-mean(df2$neighbors[df2$clus_type=="big" ])
+    df_table["clustering", "clus_small"] <- mean(df2$clus_coeff[df2$clus_type=="small" ])
+    df_table["clustering", "clus_high"] <-mean(df2$clus_coeff[df2$clus_type=="big" ])
+    df_table["assortativity", "clus_small"] <- mean(df2$assortativity[df2$clus_type=="small" ])
+    df_table["assortativity", "clus_high"] <- mean(df2$assortativity[df2$clus_type=="big" ])
+    df_table["exponent", "clus_small"] <- mean(df2$exponent[df2$clus_type=="small"])
+    df_table["exponent", "clus_high"] <- mean(df2$exponent[df2$clus_type=="big" ])
+    df_table["size", "clus_small"] <- mean(df2$size_net[df2$clus_type=="small" ])
+    df_table["size", "clus_high"] <- mean(df2$size_net[df2$clus_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_clus <- df_table$clus_high - df_table$clus_small
+  }
+
+  if ("assortativity" %in% list_vary_metrics){
+    df_table["pathlength", "ass_small"] <- mean(df2$pathlength[df2$ass_type=="small" ])
+    df_table["pathlength", "ass_high"] <- mean(df2$pathlength[df2$ass_type=="big" ])
+    df_table["neighbors", "ass_small"] <-  mean(df2$neighbors[df2$ass_type=="small" ])
+    df_table["neighbors", "ass_high"] <-mean(df2$neighbors[df2$ass_type=="big" ])
+    df_table["clustering", "ass_small"] <- mean(df2$clus_coeff[df2$ass_type=="small" ])
+    df_table["clustering", "ass_high"] <-mean(df2$clus_coeff[df2$ass_type=="big" ])
+    df_table["assortativity", "ass_small"] <- mean(df2$assortativity[df2$ass_type=="small" ])
+    df_table["assortativity", "ass_high"] <- mean(df2$assortativity[df2$ass_type=="big" ])
+    df_table["exponent", "ass_small"] <- mean(df2$exponent[df2$ass_type=="small"])
+    df_table["exponent", "ass_high"] <- mean(df2$exponent[df2$ass_type=="big" ])
+    df_table["size", "ass_small"] <- mean(df2$size_net[df2$ass_type=="small" ])
+    df_table["size", "ass_high"] <- mean(df2$size_net[df2$ass_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_ass <- df_table$ass_high - df_table$ass_small
+  }
+
+  if ("exponent" %in% list_vary_metrics){
+    df_table["pathlength", "exp_small"] <- mean(df2$pathlength[df2$exp_type=="small" ])
+    df_table["pathlength", "exp_high"] <- mean(df2$pathlength[df2$exp_type=="big" ])
+    df_table["neighbors", "exp_small"] <-  mean(df2$neighbors[df2$exp_type=="small" ])
+    df_table["neighbors", "exp_high"] <-mean(df2$neighbors[df2$exp_type=="big" ])
+    df_table["clustering", "exp_small"] <- mean(df2$clus_coeff[df2$exp_type=="small" ])
+    df_table["clustering", "exp_high"] <-mean(df2$clus_coeff[df2$exp_type=="big" ])
+    df_table["assortativity", "exp_small"] <- mean(df2$assortativity[df2$exp_type=="small" ])
+    df_table["assortativity", "exp_high"] <- mean(df2$assortativity[df2$exp_type=="big" ])
+    df_table["exponent", "exp_small"] <- mean(df2$exponent[df2$exp_type=="small"])
+    df_table["exponent", "exp_high"] <- mean(df2$exponent[df2$exp_type=="big" ])
+    df_table["size", "exp_small"] <- mean(df2$size_net[df2$exp_type=="small" ])
+    df_table["size", "exp_high"] <- mean(df2$size_net[df2$exp_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_exp <- df_table$exp_high - df_table$exp_small
+  }
+
+  if ("size" %in% list_vary_metrics){
+    df_table["pathlength", "size_small"] <- mean(df2$pathlength[df2$size_type=="small" ])
+    df_table["pathlength", "size_high"] <- mean(df2$pathlength[df2$size_type=="big" ])
+    df_table["neighbors", "size_small"] <-  mean(df2$neighbors[df2$size_type=="small" ])
+    df_table["neighbors", "size_high"] <-mean(df2$neighbors[df2$size_type=="big" ])
+    df_table["clustering", "size_small"] <- mean(df2$clus_coeff[df2$size_type=="small" ])
+    df_table["clustering", "size_high"] <-mean(df2$clus_coeff[df2$size_type=="big" ])
+    df_table["assortativity", "size_small"] <- mean(df2$assortativity[df2$size_type=="small" ])
+    df_table["assortativity", "size_high"] <- mean(df2$assortativity[df2$size_type=="big" ])
+    df_table["exponent", "size_small"] <- mean(df2$exponent[df2$size_type=="small"])
+    df_table["exponent", "size_high"] <- mean(df2$exponent[df2$size_type=="big" ])
+    df_table["size", "size_small"] <- mean(df2$size_net[df2$size_type=="small" ])
+    df_table["size", "size_high"] <- mean(df2$size_net[df2$size_type=="big" ])
+    # compute the differences between these conditions
+    df_table$diff_size <- df_table$size_high - df_table$size_small
+  }
+  return(df_table)
+}
+
+
+```
+
+
+# TIMELINE
+
+### Multinomial
+
+We use the file `D0_dirichlet_timeline` to observe the evolution of the different measures with time. 
+This file was obtained using our Netlogo program, by generating a *scale-free* network where agents have a **multinomial** bias. We generated 10 networks with 50 agents and 10 networks with 150 agents, where the values of the Dirichlet distribution of all agents was recorded at each iteration.
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# This is the "raw" file:
+filename = "Raw/D0_dirichlet_timeline"
+
+# Read this file
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "init-dirichlet", "[step]", "vector-report" ))
+
+# rename columns
+colnames(df) <- c("rep_id", "size_net", "init", "time", "vector")
+
+```
+
+Note that during all these analyses, we use the following terminology:
+
+ - **`variable_name`: explication**
+ - `init` corresponds to the variable "initial language". It can take two values: 0 for "Emergent language" and 5 for "Initial language" and 20 "Very strong initial language
+ - `size_net` refers to the size of the network
+ - `rep_id` shows the number of the replication: one replication = one network
+ - `time` shows the round number (one round = all agents speak once)
+ - `vector` shows the values of the dirichlet distribution for all agents
+ 
+ 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+df %>%
+  mutate(init=as.factor(init),
+         rep_id=as.factor(rep_id),
+         size_net = as.factor(size_net)) -> df_print
+summary(df_print)
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+df$old_rep_id <- df$rep_id
+df$rep_id <- c(1:nrow(df))# create a new column with row index
+df <- df[order(rep_id),]
+names_col <- c("person", "rep_id", "condition", "measurement")
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# change column type and normalize info
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write file
+# uncomment the lines below only if you don't do the next step, namely, looking at stabilization time
+#pathfile <- paste(path, "Summary/TIMELINE_dirichlet_scalefree", pathfileout, sep="")
+#write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+This chunk box code created the following file:
+
+ - `DO_dirichlet_timeline_merge.csv`, which contains the summarized data. It shows the inter and intra individual variation for each time step and replication.
+ 
+
+
+
+### Continuous
+
+We use the file `ALL_TIME_sf_cont` to observe the evolution of the different measures with time. 
+This file was obtained using our Netlogo program, by generating a *scale-free* network where agents have a **continuous** bias.
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#  READ FILE 1 (high clustering coefficient)
+filename = "Raw/D0_continuous_timeline"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes", "[step]", "sd-continuous-init",  "mean-report", "sd-report"))
+
+colnames(df) <- c("rep_id", "size_net", "time", "init",  "mymean", "mysd")
+
+```
+
+Note that during all these analyses, we use the following terminology:
+
+ - **`variable_name`: explication**
+ - `init` corresponds to the variable "initial language". It can take two values: 0 for "Emergent language" and 5 for "Initial language" and 20 "Very strong initial language
+ - `neighbors` corresponds to the average node degree (average number of neighbors in the network)
+ - `size_net` refers to the size of the network
+ - `rep_id` shows the number of the replication: one replication = one network
+ - `time` shows the round number (one round = all agents speak once)
+ - `mymean` shows the mean of all agents' bias
+ - `mysd` shows the std of all agents' bias
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+df %>%
+  mutate(init=as.factor(init),
+         rep_id=as.factor(rep_id),
+         size_net = as.factor(size_net)) -> df_print
+summary(df_print)
+
+```
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#
+df$old_rep_id <- df$rep_id
+df <- df[order(rep_id),]
+df_all <- data.frame(matrix(0, ncol = 8, nrow = 0))
+colnames(df_all) <- c("rep_id", "size_net", "time",  "init", "mean_mean", "sd_mean", "mean_sd", "sd_sd")
+
+# Compute values for mean and std
+for (size in unique(df$size_net)){
+  print(paste("Size:", size))
+
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+  print("mean done!")
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+  print("sd done!")
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+
+  # add to a big df
+  df_all <- rbind(df_all, df_bis)
+}
+
+df_merge <- df_all
+
+# Write file
+#pathfile <- paste(path, "Summary/TIMELINE_continuous_scalefree",  pathfileout, sep="")
+#write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+### Stabilization time
+
+```{r check stabilization time 2, echo=FALSE, message=FALSE, warning=FALSE}
+
+### Compute Stabilization time for inter-individual variation
+
+# Create new columns
+var$stab_inter <- 0
+
+# Loop for all replication, find the stabilization time for all, biased, and control nodes
+for (rep in unique(df_merge$old_rep_id)){
+
+  # Choose parameters !
+  window <- 100 # choose window size
+  precision <- 50000 # choose precision (to round the value)
+  numb_of_iter <- 50 # choose number of iterations where the curve need to stay 0
+
+  # Print and create subdataframe with only one replication
+  print(paste("Replication", rep, "out of", length(unique(df_merge$old_rep_id)), sep=" "))
+  sub_data <- df_merge[df_merge$old_rep_id==rep ,] # create subdataframe for the replication
+
+  # Initialize variables
+  success <- c(FALSE)
+  previous_all <- 999 ;
+  stabilize_all <- 1 ;
+  incr_all <- 0;
+
+  for (timing in 2:(nrow(sub_data)-window-1)){
+
+    # Compute slope for ALL nodes
+    slope_all <- round(((sub_data$mean_sd[sub_data$time==timing] - sub_data$mean_sd[sub_data$time==(timing+window)]) / window) * precision)
+
+    # Record stabilization and check if it stays the same for numb_of_iter iterations...
+
+    # ... for ALL nodes
+    if (success[1] == FALSE){
+      if ((previous_all != 0) & (slope_all == 0)) { stabilize_all <- timing }
+      if (slope_all != 0) { incr_all <- 0 } else { incr_all <- incr_all + 1 }
+      if (incr_all==numb_of_iter) { success[1] <- TRUE }
+    }
+
+    # affect new values to previous
+    previous_all <- slope_all ;
+
+    # Break the loop if all stabilization points are found
+    if (success==TRUE){ break }
+  }
+
+  # record this value in the table
+  df_merge$stab_inter[df_merge$old_rep_id==rep] <- stabilize_all
+
+}
+
+### Compute Stabilization time for intra-individual variation
+
+# Create new columns
+var$stab_intra <- 0
+
+# Loop for all replication, find the stabilization time for all, biased, and control nodes
+for (rep in unique(df_merge$old_rep_id)){
+
+  # Choose parameters !
+  window <- 100 # choose window size
+  precision <- 50000 # choose precision (to round the value)
+  numb_of_iter <- 50 # choose number of iterations where the curve need to stay 0
+
+  # Print and create subdataframe with only one replication
+  print(paste("Replication", rep, "out of", length(unique(df_merge$old_rep_id)), sep=" "))
+  sub_data <- df_merge[df_merge$old_rep_id==rep ,] # create subdataframe for the replication
+
+  # Initialize variables
+  success <- c(FALSE)
+  previous_all <- 999 ;
+  stabilize_all <- 1 ;
+  incr_all <- 0;
+
+  for (timing in 2:(nrow(sub_data)-window-1)){
+
+    # Compute slope for ALL nodes
+    slope_all <- round(((sub_data$sd_mean[sub_data$time==timing] - sub_data$sd_mean[sub_data$time==(timing+window)]) / window) * precision)
+
+    # Record stabilization and check if it stays the same for numb_of_iter iterations...
+
+    # ... for ALL nodes
+    if (success[1] == FALSE){
+      if ((previous_all != 0) & (slope_all == 0)) { stabilize_all <- timing }
+      if (slope_all != 0) { incr_all <- 0 } else { incr_all <- incr_all + 1 }
+      if (incr_all==numb_of_iter) { success[1] <- TRUE }
+    }
+
+    # affect new values to previous
+    previous_all <- slope_all ;
+
+    # Break the loop if all stabilization points are found
+    if (success==TRUE){ break }
+  }
+
+  # record this value in the table
+  df_merge$stab_intra[df_merge$old_rep_id==rep] <- stabilize_all
+
+}
+
+
+### Compute Stabilization time for std intra-individual variation
+
+# Create new columns
+var$stab_intrasd <- 0
+
+# Loop for all replication, find the stabilization time for all, biased, and control nodes
+for (rep in unique(df_merge$old_rep_id)){
+
+  # Choose parameters !
+  window <- 100 # choose window size
+  precision <- 50000 # choose precision (to round the value)
+  numb_of_iter <- 50 # choose number of iterations where the curve need to stay 0
+
+  # Print and create subdataframe with only one replication
+  print(paste("Replication", rep, "out of", length(unique(df_merge$old_rep_id)), sep=" "))
+  sub_data <- df_merge[df_merge$old_rep_id==rep ,] # create subdataframe for the replication
+
+  # Initialize variables
+  success <- c(FALSE)
+  previous_all <- 999 ;
+  stabilize_all <- 1 ;
+  incr_all <- 0;
+
+  for (timing in 2:(nrow(sub_data)-window-1)){
+
+    # Compute slope for ALL nodes
+    slope_all <- round(((sub_data$sd_sd[sub_data$time==timing] - sub_data$sd_sd[sub_data$time==(timing+window)]) / window) * precision)
+
+    # Record stabilization and check if it stays the same for numb_of_iter iterations...
+
+    # ... for ALL nodes
+    if (success[1] == FALSE){
+      if ((previous_all != 0) & (slope_all == 0)) { stabilize_all <- timing }
+      if (slope_all != 0) { incr_all <- 0 } else { incr_all <- incr_all + 1 }
+      if (incr_all==numb_of_iter) { success[1] <- TRUE }
+    }
+
+    # affect new values to previous
+    previous_all <- slope_all ;
+
+    # Break the loop if all stabilization points are found
+    if (success==TRUE){ break }
+  }
+
+  # record this value in the table
+  df_merge$stab_intrasd[df_merge$old_rep_id==rep] <- stabilize_all
+
+}
+
+# select only relevant columns
+df_merge$network_type <- "scalefree"
+df_merge2 <- df_merge[, c("rep_id", "network_type", "old_rep_id", "size_net", "init", "time", "mean_sd", "sd_mean", "sd_sd", "stab_inter", "stab_intra", "stab_intrasd" )]
+colnames(df_merge2) <- c("index", "network_type", "rep_id", "size", "init_lang_exp", "time", "inter_var", "mean_intra_var", "std_intra_var", "stab_inter", "stab_mean_intra", "stab_std_intra" )
+
+# Write file
+pathfile <- paste(path, "Summary/TIMELINE_continuous_scalefree", pathfileout, sep="")
+write.csv(df_merge2, pathfile, row.names = F)
+
+
+```
+
+
+# DATASET 1: scale-free networks
+
+In this study, we aim to investigate the effect of network metrics independently, namely, isolate them and understand what metrics contribute to shaping language variability. To do so, we compare two sets of networks, each containing 100 networks. The average metrics of these two sets are similar except for one metric. First, we used scale-free networks to analyze the independent effects of the network size, the pathlength, the assortativity, and the degree distribution. We created the two sets by generating hundreds of thousands of scale-free networks and selecting the networks with the desired properties. 
+
+## Pathlength, assortativity, degree distribution, size
+
+### Multinomial
+
+To do so, we combined the different following parameters:
+
+ - `size_net`: 50, 100
+ - `init`: 0, 5, and 20
+
+In total, there 6 different combinations of the following parameters (50-0, 50-5, 50-20, 100-0, 100-5, 100-20). Each of these combinations were run 20000 times, so in total **120,000 simulations** were run, each of them during 3000 iterations. Only the final value of each networks were kept in the output from Netlogo. The name of the file obtained from Netlogo is called `scalefree.csv` in the `Multinomial` folder. Using this file, we want to observe the individual effects of pathlength, assortativity, degree distribution and size. To do so, we cleant the file, and we applied the following steps:
+
+ - **first**, we computed the exponent of the scale-free distribution. This exponent is what we will call the variable *"degree distribution"*. All values are usually included between 2 and 3 as the scale-free networks were generated using Barabasi-Albert algorithm. However, networks with an exponent of 2 have a distribution less skewed compared to network with an exponent of 3. 
+ 
+ - **second**, we plotted the density plots for the intersection using pathlength, assortativity, and degree distribution in the different axis. Thanks to these density plots, we could visualize what values of the different variables to select while keeping one constant. Using these values, we selected sets of 100 networks with the desired values: the two sets have the same values in two of these variables but are very different regarding the third variable. We selected these sets for the two conditions *initial language exposure = yes* and *initial language exposure = no* language. 
+
+ - **third**, after we created all pairs of sets, we compute the mean of each metric for each condition, and we gather this in a table. We export this table under the name of `scalefree_tab_merge.csv`.
+ 
+ - **fourth**, we checked the maximum language value for each participant, for all replication. We save this dataframe in `scalefree_lang_merge.csv`.
+ 
+ - **fifth**, we computed the measure of inter-individual variability (by estimating the Kullback-Leibler divergence on all pairs of agents) and intra-individual variability. We save this dataframe in `scalefree_merge.csv`. Please note that the computation of Kullback-Leibler divergence takes quite long.
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+filename = "Raw/D1_dirichlet_scalefree"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "degree-all", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "degree", "vector")
+
+# compute exponent based on the degree column
+df <- compute_exponent(df)
+
+# the studied metrics out of the total metrics
+list_vary_metrics <- c("pathlength", "assortativity", "exponent", "size")
+list_all_metrics <- c("pathlength", "neighbors", "clustering", "assortativity", "exponent", "size")
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# density plots to visualize where to select the sets
+# note: a program to find the best position was very computationnally expensive. So we looked at the sets MANUALLY.
+# We can check the values after each sets have been chosen manually.
+# If you want to replicate, you don't have to change the values. If you used exactly the same setting in Behavior Space, probably the values entered below will work fine.
+
+df$density <- get_density(df$pathlength, df$assortativity, n = 100)
+ggplot(df) + geom_point(aes(pathlength, assortativity, color = density))  + facet_grid(size_net ~ init)
+df$density <- get_density(df$pathlength, df$exponent, n = 100)
+ggplot(df) + geom_point(aes(pathlength, exponent, color = density))  + facet_grid(size_net ~ init)
+df$density <- get_density(df$assortativity, df$exponent, n = 100)
+ggplot(df) + geom_point(aes(assortativity, exponent, color = density))  + facet_grid(size_net ~ init)
+
+# create empty dataframe to store final results
+df2 <- data.frame(matrix(0, ncol = (ncol(df) + length(list_vary_metrics)), nrow = 0))
+
+for (initt in unique(df$init)){
+  
+  print(paste("The value of initial language is", initt))
+  
+  # Taking the good values in order to isolate the sets
+  if (initt == 0) {
+    # for pathlength
+    param_path_ass = c(-0.35, -0.25)
+    param_path_exp = c(2.74, 2.85)
+    # for assortativity
+    param_ass_path = c(3.84, 4.145)
+    param_ass_exp = c(2.69, 2.8)
+    # for exponent
+    param_exp_path = c(4.04, 4.16)
+    param_exp_ass = c(-0.39, -0.32)
+    # for size
+    param_size_path = c(4.41, 4.59)
+    param_size_ass = c(-0.35, -0.25)
+    param_size_exp = c(2.81, 2.89)
+    
+  } else if (initt == 5){
+    # for pathlength
+    param_path_ass = c(-0.35, -0.25)
+    param_path_exp = c(2.74, 2.85)
+    # for assortativity
+    param_ass_path = c(3.80, 4.215)
+    param_ass_exp = c(2.68, 2.8)
+    # for exponent
+    param_exp_path = c(4, 4.2)
+    param_exp_ass = c(-0.4, -0.3)
+    # for size
+    param_size_path = c(4.41, 4.59)
+    param_size_ass = c(-0.35, -0.25)
+    param_size_exp = c(2.81, 2.89)
+    
+  } else if (initt == 20){
+    # for pathlength
+    param_path_ass = c(-0.35, -0.25)
+    param_path_exp = c(2.74, 2.85)
+    # for assortativity
+    param_ass_path = c(3.83, 4.145)
+    param_ass_exp = c(2.68, 2.8)
+    # for exponent
+    param_exp_path = c(4, 4.2)
+    param_exp_ass = c(-0.4, -0.3)
+    # for size
+    param_size_path = c(4.41, 4.59)
+    param_size_ass = c(-0.35, -0.25)
+    param_size_exp = c(2.81, 2.89)
+  
+  }
+  
+  # first, we isolate the effect of PATHLENGTH
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(assortativity, param_path_ass[1], param_path_ass[2]), 
+           between(exponent, param_path_exp[1], param_path_exp[2])) -> all_path 
+  # after selecting these variables, we order by pathlength and we select the ones with lowest and highest values
+  smallpath <- all_path[order(all_path$pathlength),][c(1:100),] 
+  longpath <- all_path[order(all_path$pathlength),][(c(nrow(all_path)-99):nrow(all_path)),]
+  # storing these sets
+  smallpath = affect_set_small(smallpath, "pathlength", list_vary_metrics)
+  longpath = affect_set_big(longpath, "pathlength", list_vary_metrics)
+  # checking how good it is
+  print(paste("Pathlength: ", round((mean(longpath$pathlength)) - mean(smallpath$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longpath$assortativity)) - mean(smallpath$assortativity),4)))
+  print(paste("Exponent: ", round((mean(longpath$exponent)) - mean(smallpath$exponent),4)))
+  
+  # then, we isolate the effect of ASSORTATIVITY (same procedure)
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_ass_path[1], param_ass_path[2]),
+           between(exponent, param_ass_exp[1], param_ass_exp[2])) -> all_ass
+  smallass <- all_ass[order(all_ass$assortativity),][c(1:100),]
+  longass <- all_ass[order(all_ass$assortativity),][(c(nrow(all_ass)-99):nrow(all_ass)),]
+  smallass = affect_set_small(smallass, "assortativity", list_vary_metrics)
+  longass = affect_set_big(longass, "assortativity", list_vary_metrics)
+  print(paste("Assortativity: ", round((mean(longass$assortativity)) - mean(smallass$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longass$pathlength)) - mean(smallass$pathlength),4)))
+  print(paste("Exponent: ", round((mean(longass$exponent)) - mean(smallass$exponent),4)))
+
+  # after, we isolate the effect of DEGREE DISTRIBUTION (exponent)
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_exp_path[1], param_exp_path[2]),
+           between(assortativity, param_exp_ass[1], param_exp_ass[2])) -> all_exp
+  
+  smallexp <- all_exp[order(all_exp$exponent),][c(1:100),]
+  longexp <- all_exp[order(all_exp$exponent),][(c(nrow(all_exp)-99):nrow(all_exp)),]
+  smallexp = affect_set_small(smallexp, "exponent", list_vary_metrics)
+  longexp = affect_set_big(longexp, "exponent", list_vary_metrics)
+  print(paste("Exponent: ", round((mean(longexp$exponent)) - mean(smallexp$exponent),4)))
+  print(paste("Assortativity: ", round((mean(longexp$assortativity)) - mean(smallexp$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longexp$pathlength)) - mean(smallexp$pathlength),4)))
+ 
+  # finally, we isolate the effect of SIZE
+  df %>%
+    filter(init==initt,
+           between(pathlength, param_size_path[1], param_size_path[2]),
+           between(assortativity, param_size_ass[1], param_size_ass[2]),
+           between(exponent, param_size_exp[1], param_size_exp[2])) -> all_size
+  
+  summary(as.factor(all_size$size_net))
+  smallsize <- all_size[all_size$size_net==50,][c(1:100),]
+  longsize <- all_size[all_size$size_net==100,][c(1:100),]
+  smallsize = affect_set_small(smallsize, "size", list_vary_metrics)
+  longsize = affect_set_big(longsize, "size", list_vary_metrics)
+  print(paste("Exponent: ", round((mean(longsize$exponent)) - mean(smallsize$exponent),4)))
+  print(paste("Assortativity: ", round((mean(longsize$assortativity)) - mean(smallsize$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longsize$pathlength)) - mean(smallsize$pathlength),4)))
+
+  colnames(df2) <- colnames(smallpath)
+  
+  # combine all sets in a single datagrame
+  df2 <- rbind(df2, smallpath)
+  df2 <- rbind(df2, longpath)
+  df2 <- rbind(df2, smallass)
+  df2 <- rbind(df2, longass)
+  df2 <- rbind(df2, smallsize)
+  df2 <- rbind(df2, longsize)
+  df2 <- rbind(df2, smallexp)
+  df2 <- rbind(df2, longexp)
+
+}
+
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+
+# OK! so now we have a single dataframe, df2, that gather all the interesting sets we want to look at:
+# -- one set with a high pathlength, one set with a low pathlength, but both sets have the same assortativity, size and degree distribution
+# -- one set with a high assortativty, one set with a low assortativty, but both sets have the same pathlength, size and degree distribution
+# -- one set with a high exponent, one set with a low exponent, but both sets have the same assortativity, size and pathlength
+# -- one set with a high size (100 agents), one set with a low size (50 agents), but both sets have the same assortativity, degree distribution and pathlength
+
+# Then we gather them in a table, and print the mean of each condition
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df2)
+
+# Write table
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# Start processing the data with the sets
+df2$rep_id <- c(1:nrow(df2))
+df <- df2
+df <- df[order(rep_id),]
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# now, the variable df_all2 contains all the information written in a convenient way for R: we have the value of the dirichlet distribution for each replication, each person, and each utterance
+
+# change the format and group by individuals
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# Now check the max langval for each individual and write this file
+df_all3 %>%
+  dplyr::group_by(rep_id, person) %>%
+  dplyr::summarise(max_lang = max(meas_ratio),
+                   max_cond = condition[which(meas_ratio == max(meas_ratio))],
+                   init=mean(init)) -> df_hey
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_lang_merge", pathfileout, sep="")
+write.csv(df_hey, pathfile, row.names = F)
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write the final dataframe
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+```
+
+
+### Continuous
+
+Here, we apply the exact same steps as before. The only difference is that we don't have the condition *initial language exposure = yes (strong)*. We only have the two conditions *initial language exposure = yes & no*.
+To do so, we combined the different following parameters:
+
+ - `size_net`: 50, 100
+ - `init`: 0.1 *(initial language exposure: strong)*, 0.5 *(initial language exposure: weak)*
+
+Then, we apply exactly the same steps as before.
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+
+filename = "Raw/D1_continuous_scalefree"
+pathfile <- paste(path, filename, sep="")
+df <- fread(paste(pathfile, pathfileout, sep=""), header=T, sep=",", fill=TRUE, skip=6, 
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init",  "neighborhood-size", "degree-all", "mean-report", "sd-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "neighbors", "degree", "mymean", "mysd")
+
+# compute exponent based on the degree column
+df <- compute_exponent(df)
+
+# rename previous index columns
+df$rep_id_old <- df$rep_id
+df$rep_id <- c(1:nrow(df))
+
+# List of metrics
+list_all_metrics <- c("pathlength", "neighbors", "clustering", "assortativity", "exponent", "size")
+list_vary_metrics <- c("pathlength", "assortativity", "exponent", "size")
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# density plots to visualize where to select the sets
+# note: a program to find the best position was very computationnally expensive. So we looked at the sets MANUALLY.
+# We can check the values after each sets have been chosen manually.
+# If you want to replicate, you don't have to change the values. If you used exactly the same setting in Behavior Space, probably the values entered below will work fine.
+df$density <- get_density(df$pathlength, df$assortativity, n = 100)
+ggplot(df) + geom_point(aes(pathlength, assortativity, color = density))  + facet_grid(size_net ~ init)
+
+df$density <- get_density(df$pathlength, df$exponent, n = 100)
+ggplot(df) + geom_point(aes(pathlength, exponent, color = density))  + facet_grid(size_net ~ init)
+
+df$density <- get_density(df$exponent, df$assortativity, n = 100)
+ggplot(df) + geom_point(aes(exponent, assortativity, color = density))  + facet_grid(size_net ~ init)
+
+# create empty dataframe to store final results
+df2 <- data.frame(matrix(0, ncol = (ncol(df) + length(list_vary_metrics)), nrow = 0))
+
+for (initt in unique(df$init)){
+  
+  print(paste("The value of initial language is", initt))
+  
+  # Taking the good values in order to isolate the sets
+  if (initt == 0.5) {
+    param_path_ass = c(-0.34, -0.27) # for pathlength
+    param_path_exp = c(2.71, 2.84) # for pathlength
+    param_ass_path = c(3.85, 4.15) # for assortativity
+    param_ass_exp = c(2.75, 2.82) # for assortativity
+    param_exp_path = c(3.9, 4.1) # for exponent
+    param_exp_ass = c(-0.3, -0.2) # for exponent
+    param_size_path = c(4.37, 4.50) # for size
+    param_size_ass = c(-0.35, -0.25) # for size
+    param_size_exp = c(2.8, 2.9) # for size
+  } else if (initt == 0.1){
+    param_path_ass = c(-0.34, -0.27) # for pathlength
+    param_path_exp = c(2.71, 2.84) # for pathlength
+    param_ass_path = c(3.85, 4.15) # for assortativity
+    param_ass_exp = c(2.75, 2.82) # for assortativity
+    param_exp_path = c(3.9, 4.1) # for exponent
+    param_exp_ass = c(-0.3, -0.2) # for exponent
+    param_size_path = c(4.37, 4.50) # for size
+    param_size_ass = c(-0.35, -0.25) # for size
+    param_size_exp = c(2.8, 2.9) # for size
+  }
+  
+  # PATHLENGTH (same as before)
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(assortativity, param_path_ass[1], param_path_ass[2]),
+           between(exponent, param_path_exp[1], param_path_exp[2])) -> all_path
+  smallpath <- all_path[order(all_path$pathlength),][c(1:100),] 
+  longpath <- all_path[order(all_path$pathlength),][(c(nrow(all_path)-99):nrow(all_path)),]
+  smallpath = affect_set_small(smallpath, "pathlength", list_vary_metrics)
+  longpath = affect_set_big(longpath, "pathlength", list_vary_metrics)
+  print(paste("Pathlength: ", round((mean(longpath$pathlength)) - mean(smallpath$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longpath$assortativity)) - mean(smallpath$assortativity),4)))
+  print(paste("Exponent: ", round((mean(longpath$exponent)) - mean(smallpath$exponent),4)))
+
+  # ASSORTATIVITY
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_ass_path[1], param_ass_path[2]),
+           between(exponent, param_ass_exp[1], param_ass_exp[2])) -> all_ass
+  smallass <- all_ass[order(all_ass$assortativity),][c(1:100),]
+  longass <- all_ass[order(all_ass$assortativity),][(c(nrow(all_ass)-99):nrow(all_ass)),]
+  smallass = affect_set_small(smallass, "assortativity", list_vary_metrics)
+  longass = affect_set_big(longass, "assortativity", list_vary_metrics)
+  print(paste("Assortativity: ", round((mean(longass$assortativity)) - mean(smallass$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longass$pathlength)) - mean(smallass$pathlength),4)))
+  print(paste("Exponent: ", round((mean(longass$exponent)) - mean(smallass$exponent),4)))
+
+  # DEGREE DISTRIBUTION
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_exp_path[1], param_exp_path[2]),
+           between(assortativity, param_exp_ass[1], param_exp_ass[2])) -> all_exp
+  smallexp <- all_exp[order(all_exp$exponent),][c(1:100),]
+  longexp <- all_exp[order(all_exp$exponent),][(c(nrow(all_exp)-99):nrow(all_exp)),]
+  smallexp = affect_set_small(smallexp, "exponent", list_vary_metrics)
+  longexp = affect_set_big(longexp, "exponent", list_vary_metrics)
+  print(paste("Exponent: ", round((mean(longexp$exponent)) - mean(smallexp$exponent),4)))
+  print(paste("Assortativity: ", round((mean(longexp$assortativity)) - mean(smallexp$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longexp$pathlength)) - mean(smallexp$pathlength),4)))
+
+  # SIZE
+  df %>%
+    filter(init==initt,
+           between(pathlength, param_size_path[1], param_size_path[2]),
+           between(assortativity, param_size_ass[1], param_size_ass[2]),
+           between(exponent, param_size_exp[1], param_size_exp[2])) -> all_size
+  summary(as.factor(all_size$size_net))
+  smallsize <- all_size[all_size$size_net==50,][c(1:100),]
+  longsize <- all_size[all_size$size_net==100,][c(1:100),]
+  smallsize = affect_set_small(smallsize, "size", list_vary_metrics)
+  longsize = affect_set_big(longsize, "size", list_vary_metrics)
+  print(paste("Assortativity: ", round((mean(longsize$assortativity)) - mean(smallsize$assortativity),4)))
+  print(paste("Pathlength: ", round((mean(longsize$pathlength)) - mean(smallsize$pathlength),4)))
+  print(paste("Exponent: ", round((mean(longsize$exponent)) - mean(smallsize$exponent),4)))
+
+  # combine all sets in a single dataframe
+  df2 <- rbind(df2, smallpath)
+  df2 <- rbind(df2, longpath)
+  df2 <- rbind(df2, smallass)
+  df2 <- rbind(df2, longass)
+  df2 <- rbind(df2, smallexp)
+  df2 <- rbind(df2, longexp)
+  df2 <- rbind(df2, smallsize)
+  df2 <- rbind(df2, longsize)
+}
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+# Then we gather them in a table, and print the mean of each condition
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df2)
+
+# Write table
+pathfile <- paste(path,  "Continuous/", str_sub(filename, 5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# Then find measures of inter and intra individual variation
+df <- df2
+df <- df[order(rep_id),]
+
+df_merge <- data.frame(matrix(0, ncol = 16, nrow = 0))
+colnames(df_merge) <- c("rep_id","size_net","clus_coeff","pathlength","init_mode","assortativity", "init", "neighbors", "rep_id_old", "path_type", "ass_type", "size_type"  , "mean_mean","mean_sd", "sd_mean","sd_sd")
+
+for (size in unique(df$size_net)){
+  #print(paste("Size:", size))
+  
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+  
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+  
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+  
+  # add to a big df
+  df_merge <- rbind(df_merge, df_bis)
+}
+
+df_merge <- df_merge[df_merge$sd_sd != 0,]
+
+# Write table
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = T)
+
+```
+
+
+# DATASET 1: small-world networks
+
+## Clustering coefficient 
+
+We also implemented small-world networks to investigate the specific effect of the clustering coefficient. We compared two sets of networks, both having 150 nodes with an average degree of 48: the first one has a probability p of rewiring of 0.1, while the second set has a probability p of 0.9. This parameter choice induces the first set to have a high clustering coefficient and the second to have a low clustering coefficient, while keeping other metrics constant. 
+
+### Multinomial
+
+The data in this part were already computed in the next section *Modeling*, where we ran many simulations using a lot of different parameters. We use the file `smallworld_model2_merge.csv`, file which already contains the data with the inter and intra individual variation In this part, we chose specifically to keep only the models with p-rewire = 0.1 and 0.9. We selected on purpose a very high number of neighbors (48) for a population of 150 people. When the probably of agents rewiring is low, agents tend to be in communities with their friends. 
+
+```{r , echo=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+filename = "Raw/D1_dirichlet_smallworld"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "rewire-prob", "avg-degree", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity",  "init", "rewire", "neighbors", "vector")
+
+df <- df[order(rep_id),]
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# change format, group by and normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- as.numeric(df_all3$measurement) / as.numeric(df_all3$sum_meas)
+
+# Now check the max langval for each individual and write this file
+df_all3 %>%
+  dplyr::group_by(rep_id, person) %>%
+  dplyr::summarise(max_lang = max(meas_ratio),
+                   max_cond = condition[which(meas_ratio == max(meas_ratio))],
+                   init=mean(init)) -> df_hey
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_lang_merge", pathfileout, sep="")
+write.csv(df_hey, pathfile, row.names = F)
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write file
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# here, no need to apply the same steps as before: indeed, we can easily make vary the clustering coefficient while keeping other parameters constant when we manipulate the "rewire" variable of small-world network (see Methods for more information)
+
+# then check whether only clustering coefficient differs, but putting in a table 
+df_merge$clus_type <- "unknown"
+df_merge$clus_type[df_merge$rewire==0.1] <- "big"
+df_merge$clus_type[df_merge$rewire==0.9] <- "small"
+
+# Write table for table
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = T)
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+# Then we gather them in a table, and print the mean of each condition
+list_vary_metrics = c("clustering")
+list_all_metrics = c("pathlength", "neighbors", "clustering", "assortativity", "size")
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df_merge)
+
+# Write table 
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+```
+
+### Continuous
+
+```{r , echo=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+filename = "Raw/D1_continuous_smallworld"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "rewire-prob", "avg-degree", "mean-report", "sd-report"))
+
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "rewire", "neighbors", "mymean", "mysd")
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# here too, no need to apply the same steps as before: indeed, we can easily make vary the clustering coefficient while keeping other parameters constant when we manipulate the "rewire" variable of small-world network (see Methods for more information)
+
+df$clus_type[df$rewire==0.1] <- "big"
+df$clus_type[df$rewire==0.9] <- "small"
+
+# this following part was useful before, when we were using data from D2
+# initt = 0.5
+# subdf <- df[df$init==initt & df$clustering == "high",]
+# subdf <- subdf[order(-clus_coeff),][1:100]
+# subdf2 <- df[df$init==initt & df$clustering == "low",]
+# subdf2 <- subdf2[order(clus_coeff),][1:100]
+# 
+# initt = 0.1
+# subdf3 <- df[df$init==initt & df$clustering == "high",]
+# subdf3 <- subdf3[order(-clus_coeff),][1:100]
+# subdf4 <- df[df$init==initt & df$clustering == "low",]
+# subdf4 <- subdf4[order(clus_coeff),][1:100]
+# 
+# df <- rbind(subdf, subdf2, subdf3, subdf4)
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+# Then we gather them in a table, and print the mean of each condition
+list_vary_metrics = c("clustering")
+list_all_metrics = c("pathlength", "neighbors", "clustering", "assortativity", "size")
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df)
+
+# Write table 
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+## COMPUTE VALUES
+df <- df[order(rep_id),]
+df_merge <- data.frame(matrix(0, ncol = 14, nrow = 0))
+colnames(df_merge) <- c("rep_id","size_net","clus_coeff","pathlength","init_mode","assortativity", "init","rewire","neighbors","clus_type","mean_mean","mean_sd","sd_mean" ,"sd_sd")
+
+for (size in unique(df$size_net)){
+  print(paste("Size:", size))
+
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+  print("mean done!")
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+  print("sd done!")
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+
+  # add to a big df
+  df_merge <- rbind(df_merge, df_bis)
+}
+
+df_merge$init <- as.factor(df_merge$init)
+df_merge$neighbors <- as.factor(df_merge$neighbors)
+
+# Write file
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = T)
+
+
+```
+
+
+
+# DATASET 1: random networks 
+
+## Average node degree
+
+To disentangle average degree and pathlength metrics, we also generated thousands of random networks with different connectivity (0.05 and 0.25) to obtain two sets different in average degree while keeping other metrics constant. The main challenge here was to disentangle the contribution of pathlength and average node degree.
+
+### Multinomial
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+filename = "Raw/D1_dirichlet_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+             select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "connection-prob", "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "connec", "init_mode", "assortativity", "init", "neighbors", "vector")
+
+
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# visualize what's going on with the simulations
+ggplot(df, aes(x=neighbors, y=pathlength, colour=as.factor(connec)))+
+  geom_point() +
+  facet_grid(init ~ size_net)
+
+ggplot(df, aes(x=assortativity, y=pathlength, colour=as.factor(connec)))+
+  geom_point() +
+  facet_grid(init ~ size_net)
+
+ggplot(df, aes(x=clus_coeff, y=pathlength, colour=as.factor(connec)))+
+  geom_point() +
+  facet_grid(init ~ size_net)
+
+ggplot(df, aes(x=neighbors, y=clus_coeff, colour=as.factor(connec)))+
+  geom_point() +
+  facet_grid(init ~ size_net)
+
+ggplot(df, aes(x=neighbors, y=assortativity, colour=as.factor(connec)))+
+  geom_point() +
+  facet_grid(init ~ size_net)
+
+
+# then using the same technique as before, create the two sets for pathlength and node degree
+list_vary_metrics <- c("pathlength", "neighbors")
+list_all_metrics <- c("pathlength", "neighbors", "clustering", "assortativity", "size")
+
+# create empty dataframe to store final results
+df2 <- data.frame(matrix(0, ncol = (ncol(df) + length(list_vary_metrics)), nrow = 0))
+
+for (initt in unique(df$init)){
+  
+  print(paste("The value of initial language is", initt))
+  
+  # Taking the good values in order to isolate the sets
+  if (initt == 0) {
+    # for pathlength
+    param_path_ass = c(-0.2, -0.0)
+    param_path_neigh = c(2.41, 2.48)
+    param_path_clus = c(0.006, 0.11)
+    # for neighbors
+    param_neigh_path = c(1.774, 1.788)
+    param_neigh_ass = c(-0.01, 0.22)
+    param_neigh_clus = c(0.238, 0.26)
+
+  } else if (initt == 5){
+    # for pathlength
+    param_path_ass = c(-0.22, -0.0)
+    param_path_neigh = c(2.41, 2.48)
+    param_path_clus = c(0.006, 0.11)
+    # for neighbors
+    param_neigh_path = c(1.774, 1.788)
+    param_neigh_ass = c(-0.01, 0.22)
+    param_neigh_clus = c(0.238, 0.26)
+    
+  } else if (initt == 20){
+    # for pathlength
+    param_path_ass = c(-0.22, -0.0)
+    param_path_neigh = c(2.41, 2.48)
+    param_path_clus = c(0.006, 0.11)
+    # for neighbors
+    param_neigh_path = c(1.774, 1.788)
+    param_neigh_ass = c(-0.01, 0.22)
+    param_neigh_clus = c(0.238, 0.26)
+  
+  }
+  
+  # PATHLENGTH
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(assortativity, param_path_ass[1], param_path_ass[2]),
+           between(neighbors, param_path_neigh[1], param_path_neigh[2]),
+           between(clus_coeff, param_path_clus[1], param_path_clus[2])) -> all_path 
+  smallpath <- all_path[order(all_path$pathlength),][c(1:100),] 
+  longpath <- all_path[order(all_path$pathlength),][(c(nrow(all_path)-99):nrow(all_path)),]
+  smallpath = affect_set_small(smallpath, "pathlength", list_vary_metrics)
+  longpath = affect_set_big(longpath, "pathlength", list_vary_metrics)
+  print(paste("Pathlength: ", round((mean(longpath$pathlength)) - mean(smallpath$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longpath$assortativity)) - mean(smallpath$assortativity),4)))
+  print(paste("Neighbors: ", round((mean(longpath$neighbors)) - mean(smallpath$neighbors),4)))
+  print(paste("Clustering: ", round((mean(longpath$clus_coeff)) - mean(smallpath$clus_coeff),4)))
+ 
+  # NEIGHBORS
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_neigh_path[1], param_neigh_path[2]),
+           between(assortativity, param_neigh_ass[1], param_neigh_ass[2]),
+           between(clus_coeff, param_neigh_clus[1], param_neigh_clus[2])) -> all_neigh
+  smallneigh <- all_neigh[order(all_neigh$neighbors),][c(1:100),]
+  longneigh <- all_neigh[order(all_neigh$neighbors),][(c(nrow(all_neigh)-99):nrow(all_neigh)),]
+  smallneigh = affect_set_small(smallneigh, "neighbors", list_vary_metrics)
+  longneigh = affect_set_big(longneigh, "neighbors", list_vary_metrics)
+  print(paste("Neighbors: ", round((mean(longneigh$neighbors)) - mean(smallneigh$neighbors),4)))
+  print(paste("Pathlength: ", round((mean(longneigh$pathlength)) - mean(smallneigh$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longneigh$assortativity)) - mean(smallneigh$assortativity),4)))
+  print(paste("Clustering: ", round((mean(longneigh$clus_coeff)) - mean(smallneigh$clus_coeff),4)))
+  
+  colnames(df2) <- colnames(smallpath)
+  
+  # combine all sets in a single datagrame
+  df2 <- rbind(df2, smallpath)
+  df2 <- rbind(df2, longpath)
+  df2 <- rbind(df2, smallneigh)
+  df2 <- rbind(df2, longneigh)
+}
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+# create table gathering all the necessary information about the sets
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df2)
+
+# write the table
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# start processing the file with the sets
+df2$rep_id <- c(1:nrow(df2))
+df <- df2
+df <- df[order(rep_id),]
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# change format and group by person
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# Now check the max langval for each individual
+df_all3 %>%
+  dplyr::group_by(rep_id, person) %>%
+  dplyr::summarise(max_lang = max(meas_ratio),
+                   max_cond = condition[which(meas_ratio == max(meas_ratio))],
+                   init=mean(init)) -> df_hey
+
+# write this dataframe
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_lang_merge", pathfileout, sep="")
+write.csv(df_hey, pathfile, row.names = F)
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# write final table
+pathfile <- paste(path, "Multinomial/", str_sub(filename,5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+
+
+### Continuous
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+filename = "Raw/D1_continuous_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init",  "rewire-prob", "avg-degree", "mean-report", "sd-report"))
+
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "rewire", "neighbors", "mymean", "mysd")
+
+##############################################
+### ----- Create the sets of network ----- ###
+##############################################
+
+# then using the same technique as before, create the two sets for pathlength and node degree
+list_vary_metrics <- c("pathlength", "neighbors")
+list_all_metrics <- c("pathlength", "neighbors", "clustering", "assortativity", "size")
+
+# visualize it
+df$density <- get_density(df$pathlength, df$neighbors, n = 100)
+ggplot(df) + geom_point(aes(pathlength, neighbors, color = density)) + scale_color_viridis() + facet_grid(size_net ~ .) + geom_vline(xintercept = 1) +geom_vline(xintercept = 1.20)
+
+
+# create empty dataframe to store final results
+df2 <- data.frame(matrix(0, ncol = (ncol(df) + length(list_vary_metrics)), nrow = 0))
+
+for (initt in unique(df$init)){
+  
+  print(paste("The value of initial language is", initt))
+  
+  # Taking the good values in order to isolate the sets
+  if (initt == 0.5) {
+    # for pathlength
+    param_path_ass = c(-0.22, 0.1)
+    param_path_neigh = c(2.40, 2.49)
+    param_path_clus = c(0.005, 0.15)
+    # for neighbors
+    param_neigh_path = c(1.774, 1.788)
+    param_neigh_ass = c(-0.01, 0.22)
+    param_neigh_clus = c(0.238, 0.26)
+
+  } else if (initt == 0.1){
+    # for pathlength
+    param_path_ass = c(-0.22, -0.0)
+    param_path_neigh = c(2.41, 2.48)
+    param_path_clus = c(0.006, 0.11)
+    # for neighbors
+    param_neigh_path = c(1.774, 1.788)
+    param_neigh_ass = c(-0.01, 0.22)
+    param_neigh_clus = c(0.238, 0.26)
+  }
+  
+  # PATHLENGTH
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(assortativity, param_path_ass[1], param_path_ass[2]),
+           between(neighbors, param_path_neigh[1], param_path_neigh[2]),
+           between(clus_coeff, param_path_clus[1], param_path_clus[2])) -> all_path 
+  smallpath <- all_path[order(all_path$pathlength),][c(1:100),] 
+  longpath <- all_path[order(all_path$pathlength),][(c(nrow(all_path)-99):nrow(all_path)),]
+  smallpath = affect_set_small(smallpath, "pathlength", list_vary_metrics)
+  longpath = affect_set_big(longpath, "pathlength", list_vary_metrics)
+  print(paste("Pathlength: ", round((mean(longpath$pathlength)) - mean(smallpath$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longpath$assortativity)) - mean(smallpath$assortativity),4)))
+  print(paste("Neighbors: ", round((mean(longpath$neighbors)) - mean(smallpath$neighbors),4)))
+  print(paste("Clustering: ", round((mean(longpath$clus_coeff)) - mean(smallpath$clus_coeff),4)))
+ 
+  # NEIGHBORS
+  df %>%
+    filter(init==initt,
+           size_net==50,
+           between(pathlength, param_neigh_path[1], param_neigh_path[2]),
+           between(assortativity, param_neigh_ass[1], param_neigh_ass[2]),
+           between(clus_coeff, param_neigh_clus[1], param_neigh_clus[2])) -> all_neigh
+  smallneigh <- all_neigh[order(all_neigh$neighbors),][c(1:100),]
+  longneigh <- all_neigh[order(all_neigh$neighbors),][(c(nrow(all_neigh)-99):nrow(all_neigh)),]
+  smallneigh = affect_set_small(smallneigh, "neighbors", list_vary_metrics)
+  longneigh = affect_set_big(longneigh, "neighbors", list_vary_metrics)
+  print(paste("Neighbors: ", round((mean(longneigh$neighbors)) - mean(smallneigh$neighbors),4)))
+  print(paste("Pathlength: ", round((mean(longneigh$pathlength)) - mean(smallneigh$pathlength),4)))
+  print(paste("Assortativity: ", round((mean(longneigh$assortativity)) - mean(smallneigh$assortativity),4)))
+  print(paste("Clustering: ", round((mean(longneigh$clus_coeff)) - mean(smallneigh$clus_coeff),4)))
+  
+  colnames(df2) <- colnames(smallpath)
+
+  # combine all sets in a single dataframe
+  df2 <- rbind(df2, smallpath)
+  df2 <- rbind(df2, longpath)
+  df2 <- rbind(df2, smallneigh)
+  df2 <- rbind(df2, longneigh)
+}
+
+#############################################################
+### ----- Create the table gathering info about set ----- ###
+#############################################################
+
+# Then we gather them in a table, and print the mean of each condition
+df_table <- create_summary_table(list_vary_metrics, list_all_metrics, df2)
+
+# write final table
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_tab_merge", pathfileout, sep="")
+write.csv(df_table, pathfile, row.names = T)
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# start processing the file
+df <- df2
+df <- df[order(rep_id),]
+
+df_all <- data.frame(matrix(0, ncol = 16, nrow = 0))
+colnames(df_all) <- c("rep_id","size_net","clus_coeff","pathlength","init_mode","assortativity", "init","rewire",  "neighbors","density","path_type","neigh_type","mean_mean","mean_sd","sd_mean","sd_sd")
+
+for (size in unique(df$size_net)){
+  # print(paste("Size:", size))
+  
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+  
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+  
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+  
+  # add to a big df
+  df_all <- rbind(df_all, df_bis)
+}
+
+df_merge <- df_all
+
+# write final table
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+```
+
+## MERGE all dataset 1's files together
+
+### Multinomial
+
+Merge the "table" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read file scalefree
+filename = "Multinomial/D1_dirichlet_scalefree_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- data.frame(t(fread(pathfile, header=T, sep=",", fill=TRUE)))
+colnames(df1) <- as.character(df1[c("V1"),])
+df1 <- df1[!(row.names(df1) %in% "V1"),]
+df1$network_type <- "Scalefree"
+
+# Read file Random
+filename = "Multinomial/D1_dirichlet_random_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+colnames(df2)[colnames(df2) == 'path_small'] <- 'path_small_ran'
+colnames(df2)[colnames(df2) == 'path_high'] <- 'path_high_ran'
+colnames(df2)[colnames(df2) == 'diff_path'] <- 'diff_path_ran'
+df2 <-  data.frame(t(df2))
+colnames(df2) <- as.character(df2[c("V1"),])
+df2 <- df2[!(row.names(df2) %in% "V1"),]
+df2$network_type <- "Random"
+
+# Read file Smallworld
+filename = "Multinomial/D1_dirichlet_smallworld_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <-  data.frame(t(fread(pathfile, header=T, sep=",", fill=TRUE)))
+colnames(df3) <- as.character(df3[c("V1"),])
+df3 <- df3[!(row.names(df3) %in% "V1"),]
+df3$network_type <- "Small-world"
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# Write final summary file
+pathfile <- paste(path, "Summary/DATASET1_dirichlet_table", pathfileout, sep="")
+write.csv(df, pathfile, row.names = T)
+
+
+```
+
+Merge the "variation" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read scalefree file
+filename = "Multinomial/D1_dirichlet_scalefree_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$neigh_type <- NA
+df1$clus_type <- NA
+df1 <- df1[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type", "ass_type", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read random file
+filename = "Multinomial/D1_dirichlet_random_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$ass_type <- NA
+df2$exp_type <- NA
+df2$size_type <- NA
+df2$clus_type <- NA
+df2$exponent <- NA
+df2 <- df2[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type", "ass_type", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read smallworld file
+filename = "Multinomial/D1_dirichlet_smallworld_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+df3$ass_type <- NA
+df3$exp_type <- NA
+df3$size_type <- NA
+df3$neigh_type <- NA
+df3$path_type <- NA
+df3$exponent <- NA
+df3 <- df3[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type",  "ass_type","klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# rename columns
+colnames(df) <- c("rep_id","network_type", "size", "clustering", "pathlength", "value_lang_start", "assortativity", "exponent", "init_lang_exp", "node_degree", "path_type", "exp_type", "size_type", "neigh_type", "clus_type", "ass_type", "inter_var", "mean_intra_var", "std_intra_var")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)"),
+              path_type = case_when(path_type == "big" ~ "High",
+                                     path_type == "small" ~ "Low",
+                                     path_type == "unknown" ~ "None"),
+              exp_type = case_when(exp_type == "big" ~ "High",
+                                    exp_type == "small" ~ "Low",
+                                    exp_type == "unknown" ~ "None"),
+              size_type = case_when(size_type == "big" ~ "High",
+                                     size_type == "small" ~ "Low",
+                                     size_type == "unknown" ~ "None"),
+              ass_type = case_when(ass_type == "big" ~ "High",
+                                     ass_type == "small" ~ "Low",
+                                     ass_type == "unknown" ~ "None"),
+              neigh_type = case_when(neigh_type == "big" ~ "High",
+                                      neigh_type == "small" ~ "Low",
+                                      neigh_type == "unknown" ~ "None"),
+              clus_type = case_when(clus_type == "big" ~ "High",
+                                     clus_type == "small" ~ "Low",
+                                     clus_type == "unknown" ~ "None")) -> df
+
+# Write file
+pathfile <- paste(path, "Summary/DATASET1_dirichlet_variation", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+```
+
+Merge the "language" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Scalefree
+filename = "Multinomial/D1_dirichlet_scalefree_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+
+# Random
+filename = "Multinomial/D1_dirichlet_random_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+
+# Smallworld
+filename = "Multinomial/D1_dirichlet_smallworld_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+
+# Merge the 3 datasets
+df <- rbind(df1, df2, df3)
+
+# Rename columns
+colnames(df) <- c("rep_id","person", "value_max_utt", "most_used_utt", "init_lang_exp", "network_type")
+
+# Change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)")) -> df
+# Write table
+pathfile <- paste(path, "Summary/DATASET1_dirichlet_language", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+```
+
+### Continuous
+
+Merge the "table" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read file scalefree
+filename = "Continuous/D1_continuous_scalefree_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- data.frame(t(fread(pathfile, header=T, sep=",", fill=TRUE)))
+colnames(df1) <- as.character(df1[c("V1"),])
+df1 <- df1[!(row.names(df1) %in% "V1"),]
+df1$network_type <- "Scalefree"
+
+# Read file Random
+filename = "Continuous/D1_continuous_random_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+colnames(df2)[colnames(df2) == 'path_small'] <- 'path_small_ran'
+colnames(df2)[colnames(df2) == 'path_high'] <- 'path_high_ran'
+colnames(df2)[colnames(df2) == 'diff_path'] <- 'diff_path_ran'
+df2 <-  data.frame(t(df2))
+colnames(df2) <- as.character(df2[c("V1"),])
+df2 <- df2[!(row.names(df2) %in% "V1"),]
+df2$network_type <- "Random"
+
+# Read file Smallworld
+filename = "Continuous/D1_continuous_smallworld_tab_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <-  data.frame(t(fread(pathfile, header=T, sep=",", fill=TRUE)))
+colnames(df3) <- as.character(df3[c("V1"),])
+df3 <- df3[!(row.names(df3) %in% "V1"),]
+df3$network_type <- "Small-world"
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# Write final summary file
+pathfile <- paste(path, "Summary/DATASET1_continuous_table", pathfileout, sep="")
+write.csv(df, pathfile, row.names = T)
+
+
+```
+
+Merge the "variation" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read scalefree file
+filename = "Continuous/D1_continuous_scalefree_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$neigh_type <- NA
+df1$clus_type <- NA
+df1 <- df1[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type","ass_type", "mean_mean", "mean_sd", "sd_mean", "sd_sd")]
+
+# Read random file
+filename = "Continuous/D1_continuous_random_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$ass_type <- NA
+df2$exp_type <- NA
+df2$size_type <- NA
+df2$clus_type <- NA
+df2$exponent <- NA
+df2 <- df2[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type", "ass_type", "mean_mean", "mean_sd", "sd_mean", "sd_sd")]
+
+# Read smallworld file
+filename = "Continuous/D1_continuous_smallworld_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+df3$ass_type <- NA
+df3$exp_type <- NA
+df3$size_type <- NA
+df3$neigh_type <- NA
+df3$path_type <- NA
+df3$exponent <- NA
+df3 <- df3[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "path_type", "exp_type", "size_type", "neigh_type", "clus_type","ass_type", "mean_mean", "mean_sd", "sd_mean", "sd_sd")]
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# rename columns
+colnames(df) <- c("rep_id","network_type", "size", "clustering", "pathlength", "value_lang_start", "assortativity", "exponent", "init_lang_exp", "node_degree", "path_type", "exp_type", "size_type", "neigh_type", "clus_type","ass_type", "mean_lang", "inter_var", "mean_intra_var", "std_intra_var")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0.1 ~ "With (strong)",
+                                        init_lang_exp == 0.5 ~ "With (weak)"),
+              path_type = case_when(path_type == "big" ~ "High",
+                                     path_type == "small" ~ "Low",
+                                     path_type == "unknown" ~ "None"),
+              exp_type = case_when(exp_type == "big" ~ "High",
+                                    exp_type == "small" ~ "Low",
+                                    exp_type == "unknown" ~ "None"),
+              size_type = case_when(size_type == "big" ~ "High",
+                                     size_type == "small" ~ "Low",
+                                     size_type == "unknown" ~ "None"),
+              neigh_type = case_when(neigh_type == "big" ~ "High",
+                                      neigh_type == "small" ~ "Low",
+                                      neigh_type == "unknown" ~ "None"),
+              ass_type = case_when(ass_type == "big" ~ "High",
+                                      ass_type == "small" ~ "Low",
+                                      ass_type == "unknown" ~ "None"),
+              clus_type = case_when(clus_type == "big" ~ "High",
+                                     clus_type == "small" ~ "Low",
+                                     clus_type == "unknown" ~ "None")) -> df
+
+# Write file
+pathfile <- paste(path, "Summary/DATASET1_continuous_variation", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+```
+
+
+# DATASET 2: scale-free networks
+
+### Multinomial
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+path = "C:/Users/Mathilde JOSSERAND/Documents/NetworkStructure_ABM-main/Inputfiles/"
+pathfileout = ".csv"
+
+# read file
+filename = "Raw/D2_dirichlet_scalefree"
+# read file
+#filename = "Raw/D2_dirichlet_scalefree"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff",  "init-dirichlet", "avg-degree", "degree-all", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity",  "init", "neighbors", "degree", "vector")
+
+# order
+df <- df[order(rep_id),]
+
+# Compute exponent based on Clauset method
+df <- compute_exponent_clauset(df)
+
+# compute exponent based on the degree column
+df <- compute_exponent(df)
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# reformat and group by + normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write table
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+
+### Continuous
+
+No dataset.
+
+# DATASET 2: small-world networks
+
+## Multinomial
+
+```{r , echo=FALSE}
+
+path = "C:/Users/Mathilde JOSSERAND/Documents/NetworkStructure_ABM-main/Inputfiles/"
+pathfileout = ".csv"
+
+# read file
+filename = "Raw/D2_dir_smallworld"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "rewire-prob", "avg-degree", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity",  "init", "rewire", "neighbors", "vector")
+
+df <- df[order(rep_id),]
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# change format, group by and normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write file
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+```
+
+
+## Continuous
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# read file
+filename = "Raw/D2_continuous_smallworld"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "rewire-prob", "avg-degree", "mean-report", "sd-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "rewire", "neighbors", "mymean", "mysd")
+
+# compute values
+df <- df[order(rep_id),]
+df_all <- data.frame(matrix(0, ncol = 13, nrow = 0))
+colnames(df_all) <- c("rep_id","size_net","clus_coeff","pathlength","init_mode","assortativity" ,"init","rewire","neighbors","mean_mean","mean_sd","sd_mean","sd_sd" )
+
+for (size in unique(df$size_net)){
+  print(paste("Size:", size))
+
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+  print("mean done!")
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+  print("sd done!")
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+
+  # add to a big df
+  df_all <- rbind(df_all, df_bis)
+}
+
+df_merge <- df_all
+
+# Write file
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5),"_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+# DATASET 2: random networks
+
+## Multinomial
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+path = "C:/Users/Mathilde JOSSERAND/Documents/NetworkStructure_ABM-main/Inputfiles/"
+pathfileout = ".csv"
+
+## read file
+# read file
+filename = "Raw/D2_dir_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "connection-prob", "avg-degree", "vector-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity",  "init", "connec", "neighbors", "vector")
+
+df <- df[order(rep_id),]
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# reformat and group by
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write table
+pathfile <- paste(path, "Multinomial/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+
+
+## Continuous
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#  read file
+filename = "Raw/D2_continuous_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "nb-link-extra", "rewire-prob", "avg-degree", "mean-report", "sd-report"))
+colnames(df) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "family", "rewire", "neighbors", "mymean", "mysd")
+
+# compute values
+df <- df[order(rep_id),]
+df_all <- data.frame(matrix(0, ncol = 14, nrow = 0))
+colnames(df_all) <- c("rep_id","size_net","clus_coeff","pathlength","init_mode","assortativity", "init","family","rewire","neighbors","mean_mean","mean_sd","sd_mean","sd_sd" )
+
+for (size in unique(df$size_net)){
+  print(paste("Size:", size))
+
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+  print("mean done!")
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+  print("sd done!")
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+
+  # add to a big df
+  df_all <- rbind(df_all, df_bis)
+}
+
+df_merge <- df_all
+
+# Write file
+pathfile <- paste(path, "Continuous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge,  pathfile, row.names = F)
+
+
+```
+
+## MERGE all dataset 2's files together
+
+### Multinomial
+
+Merge the "variation" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read scalefree file
+filename = "Multinomial/D2_dirichlet_scalefree_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$connec <- NA
+df1$rewire <- NA
+df1 <- df1[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "connec","rewire", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read random file
+filename = "Multinomial/D2_dirichlet_random_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$exponent <- NA
+df2$rewire <- NA
+df2 <- df2[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "connec","rewire",  "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read smallworld file
+filename = "Multinomial/D2_dirichlet_smallworld_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+df3$exponent <- NA
+df3$connec <- NA
+df3 <- df3[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "connec", "rewire", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# rename columns
+colnames(df) <- c("rep_id","network_type", "size", "clustering", "pathlength", "value_lang_start", "assortativity", "exponent", "init_lang_exp", "node_degree", "connection_prob", "rewire", "inter_var", "mean_intra_var", "std_intra_var")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)")) -> df
+
+# Write file
+pathfile <- paste(path, "Summary/DATASET2_dirichlet", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+```
+
+### Continuous
+
+Merge the "variation" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read scalefree file
+# filename = "Continuous/D2_continuous_scalefree_merge"
+# pathfile <- paste(path, filename, pathfileout, sep="")
+# df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+# df1$network <- "Scalefree"
+# df1 <- df1[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors",  "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read random file
+filename = "Continuous/D2_continuous_random_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$exponent <- NA
+df2 <- df2[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors",  "mean_mean", "mean_sd", "sd_mean", "sd_sd")]
+
+# Read smallworld file
+filename = "Continuous/D2_continuous_smallworld_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+df3$exponent <- NA
+df3 <- df3[, c("rep_id","network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors",  "mean_mean", "mean_sd", "sd_mean", "sd_sd")]
+
+# merge all files
+df <- rbind(df2, df3)
+
+# rename columns
+colnames(df) <- c("rep_id","network_type", "size", "clustering", "pathlength", "value_lang_start", "assortativity", "exponent", "init_lang_exp", "node_degree", "mean_lang", "inter_var", "mean_intra_var", "std_intra_var")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0.1 ~ "With (strong)",
+                                        init_lang_exp == 0.5 ~ "With (weak)")) -> df
+
+# Write file
+pathfile <- paste(path, "Summary/DATASET2_continuous", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+```
+
+# DATASET 3: dirichlet (inter-individual variation within the network)
+
+## Preliminary analysis
+
+```{r}
+
+###########################################################
+### ----- MERGE RANDOM, SMALL-WORLD and SCALE-FREE ----- ###
+###########################################################
+
+
+### Read Scalefree file
+
+filename = "Raw/D3sup_dir_scalefree_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df_sf <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6, select = c("[run number]", "[step]","degree-all","bet-all","clo-all","eig-all", "clus-all"))
+df_sf$network_type = "Scalefree"
+
+
+### Read Small-world file
+
+filename = "Raw/D3sup_dir_smallworld_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df_sw <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6, select = c("[run number]", "[step]","degree-all","bet-all","clo-all","eig-all", "clus-all", "rewire-prob"))
+df_sw_01 <- df_sw[df_sw$`rewire-prob`==0.1,]
+df_sw_09 <- df_sw[df_sw$`rewire-prob`==0.9,]
+df_sw_01$`rewire-prob` <- NULL
+df_sw_09$`rewire-prob` <- NULL
+df_sw_01$network_type = "Small-world01"
+df_sw_09$network_type = "Small-world09"
+
+
+### Read Random file
+
+filename = "Raw/D3sup_dir_random_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df_ran <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6, select = c("[run number]", "[step]","degree-all","bet-all","clo-all","eig-all", "clus-all"))
+df_ran$network_type = "Random"
+
+
+### Merge together
+
+df_sup_all <- rbind(df_sf, df_sw_01, df_sw_09, df_ran)
+colnames(df_sup_all) <- c("rep_id", "time", "degree", "between", "closeness", "eigenvector", "clustering", "network_type")
+
+
+### Write file
+
+pathfile <- paste(path, "Summary/DATASET3_supplementary", pathfileout, sep="")
+write.csv(df_sup_all, pathfile, row.names = F)
+
+
+```
+
+## Multinomial
+
+### Scale-free
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+
+# read file with random agents that were biased
+filename = "Raw/D3_dirichlet_scalefree_ran"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased", "degree-all", "vector-report"))
+
+colnames(df2) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased", "degree",  "vector")
+df2$who_biased = "none"
+
+# read file where no agents are biased
+filename = "Raw/D3_dirichlet_scalefree_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased", "degree-all", "vector-report"))
+
+colnames(df3) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased","deg_biased", "deg_unbiased", "degree",  "vector")
+df3$who_biased = "none"
+df3$level_bias = "none"
+df3$where_bias = NA
+
+# read file where no agents are biased
+filename = "Raw/D3_dirichlet_scalefree"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased","deg-biased", "deg-unbiased", "degree-all", "vector-report"))
+
+colnames(df1) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased", "degree",  "vector")
+
+# bind the 3 files
+df <- rbind(df1, df2, df3)
+
+# compute exponent based on the degree column
+df <- compute_exponent(df)
+
+
+############################################################################
+### ----- Write language data ----- ###
+############################################################################
+
+# write the file as it is (because it contains the language data)
+df$old_rep_id <- df$rep_id
+df$rep_id <- c(1:nrow(df))
+df <- df[order(rep_id),]
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_data", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# reformat and group by + normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# Now check the max langval for each individual
+df_all3 %>%
+  dplyr::group_by(condition, init, percent_bias, where_bias, level_bias, who_biased, size_net) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all333
+
+# write file
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge", pathfileout, sep="")
+write.csv(df_all333, pathfile, row.names = F)
+
+# group by conditions
+df_all3 %>%
+  dplyr::group_by(rep_id, condition, init, percent_bias, where_bias, level_bias, who_biased, size_net) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all444
+
+# write this file too (they give slightly different information)
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge_bis", pathfileout, sep="")
+write.csv(df_all444, pathfile, row.names = F)
+
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write file
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+```
+
+
+
+
+### Random
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+
+# file with the data where agents are randomly biased
+filename = "Raw/D3_dirichlet_random_ran"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased",  "vector-report"))
+
+colnames(df2) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased" ,  "vector")
+df2$who_biased = "none"
+
+# file where no agents are biased
+filename = "Raw/D3_dirichlet_random_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased","vector-report"))
+
+colnames(df3) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased","deg_biased", "deg_unbiased" ,  "vector")
+df3$who_biased = "none"
+df3$level_bias = "none"
+df3$where_bias = NA
+
+# file where no agents are biased
+filename = "Raw/D3_dirichlet_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased","deg-biased", "deg-unbiased",  "vector-report"))
+
+colnames(df1) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased","deg_biased", "deg_unbiased" ,  "vector")
+
+# bind dataframe
+df <- rbind(df1, df2, df3)
+
+############################################################################
+### ----- Write language data ----- ###
+############################################################################
+
+# write raw data to file
+df$old_rep_id <- df$rep_id
+df$rep_id <- c(1:nrow(df))
+df <- df[order(rep_id),]
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_data", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# reformat, group by and normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# check the language and write file
+df_all3 %>%
+  dplyr::group_by(condition, init, percent_bias, where_bias, level_bias, who_biased, size_net) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all333
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge", pathfileout, sep="")
+write.csv(df_all333, pathfile, row.names = F)
+
+# write file about language (using different form)
+df_all3 %>%
+  dplyr::group_by(rep_id, condition, init, percent_bias, where_bias, level_bias, who_biased, size_net) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all444
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge_bis", pathfileout, sep="")
+write.csv(df_all444, pathfile, row.names = F)
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# write file
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+```
+
+
+### Small-world
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+#############################
+### ----- Read file ----- ###
+#############################
+
+
+# read file where agents are randomly biased
+filename = "Raw/D3_dirichlet_smallworld_ran"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased",  "rewire-prob", "vector-report"))
+colnames(df2) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased" , "rewire",  "vector")
+df2$who_biased = "none"
+
+# read file where agents are not biased
+filename = "Raw/D3_dirichlet_smallworld_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased", "rewire-prob", "vector-report"))
+colnames(df3) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased", "rewire",  "vector")
+df3$who_biased = "none"
+df3$level_bias = "none"
+df3$where_bias = NA
+
+# read file with all
+filename = "Raw/D3_dirichlet_smallworld"
+pathfile <- paste(path, filename, pathfileout, sep="")
+
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength",  "init-average-mode", "assort-coeff", "init-dirichlet", "avg-degree", "value-init-dirichlet-add", "bias-additionnal", "type-ind-biased", "percent-bias", "centbet-biased",	"centbet-unbiased",	"cluscoeff-biased",	"cluscoeff-unbiased",	"centeigen-biased",	"centeigen-unbiased",	"centclos-biased",	"centclos-unbiased",	"assor-biased",	"assor-unbiased", "deg-biased", "deg-unbiased", "rewire-prob", "vector-report"))
+
+colnames(df1) <- c("rep_id", "size_net", "clus_coeff",  "pathlength",  "init_mode", "assortativity", "init", "neighbors", "where_bias", "level_bias", "who_biased", "percent_bias", "bet_biased", "bet_unbiased", "clus_biased", "clus_unbiased", "eigen_biased", "eigen_unbiased", "clos_biased", "close_unbiased", "assor_biased", "assor_unbiased", "deg_biased", "deg_unbiased", "rewire",  "vector")
+
+# combine files
+df <- rbind(df1, df2, df3)
+
+#select specific conditions otherwise it is too long...
+#df <- df[df$size_net==150 & (df$percent_bias == 20 | df$percent_bias == 0) & df$who_biased != "pathlen" & df$who_biased != "assor" & ( df$where_bias == 7 |  is.na(df$where_bias) == TRUE),]
+
+df$pathlength <- as.numeric(df$pathlength)
+df <- df[is.na(df$pathlength)==FALSE,]
+
+############################################################################
+### ----- Write language data ----- ###
+############################################################################
+
+# write raw data
+df$old_rep_id <- df$rep_id
+df$rep_id <- c(1:nrow(df))
+df <- df[order(rep_id),]
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_data", pathfileout, sep="")
+write.csv(df, pathfile, row.names = F)
+
+
+############################################################################
+### ----- Compute values for language, inter and intra variability ----- ###
+############################################################################
+
+# preprocess the vector column
+df_all2 <- preprocess_vector(df)
+
+# reformat, group by and normalize
+df_all2 %>%
+  mutate(measurement = as.numeric(measurement),
+         person = as.factor(person),
+         condition = as.numeric(condition),
+         size_net = as.factor(size_net),
+         rep_id = as.factor(rep_id)) %>%
+  dplyr::group_by(person, rep_id) %>%
+  dplyr::summarise(sum_meas = sum(measurement)) -> df1
+df_all3 <- merge(df_all2, df1, by=c("person", "rep_id"), all.x=TRUE)
+df_all3$measurement <- as.numeric(df_all3$measurement)
+df_all3$meas_ratio <- df_all3$measurement / df_all3$sum_meas
+
+# Write file containing language data 
+df_all3 %>%
+  dplyr::group_by(condition, init, percent_bias, where_bias, level_bias, who_biased, size_net, rewire) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all333
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge", pathfileout, sep="")
+write.csv(df_all333, pathfile, row.names = F)
+
+# Write file containing other type of language data 
+df_all3 %>%
+  dplyr::group_by(rep_id, condition, init, percent_bias, where_bias, level_bias, who_biased, size_net, rewire) %>%
+  dplyr::summarize(mean_cond = mean(meas_ratio),
+                   std_cond = sd(meas_ratio)) -> df_all444
+
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_lang_merge_bis", pathfileout, sep="")
+write.csv(df_all444, pathfile, row.names = F)
+
+# apply KUllback-Leibler divergence (pairwaise comparison)
+# Note: this will take a long time!
+dfff <- apply_KL_divergence(df_all3)
+
+# find all inter- and intra-individual variability measures
+df_merge <- add_all_variability_meas(df_all3, df, dfff)
+
+# Write file
+pathfile <- paste(path, "Heterogenous/", str_sub(filename, 5), "_merge", pathfileout, sep="")
+write.csv(df_merge, pathfile, row.names = F)
+
+
+```
+
+
+## Continuous
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+filename = "continuous_hetero"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "avg-degree", "mean-continuous-init-add", "bias-additionnal", "type-ind-biased", "mean-report", "sd-report"))
+
+colnames(df1) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "neighbors", "mean_added", "hetero_type", "feature_biased", "mymean", "mysd")
+
+
+filename = "continuous_hetero_random"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "avg-degree", "mean-continuous-init-add", "bias-additionnal", "type-ind-biased", "mean-report", "sd-report"))
+
+colnames(df2) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "neighbors", "mean_added", "hetero_type", "feature_biased", "mymean", "mysd")
+df2$feature_biased <- "none"
+
+filename = "continuous_hetero_none"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE, skip=6,
+            select = c("[run number]", "num-nodes",  "clust-coeff",  "mean-pathlength", "init-average-mode", "assort-coeff", "sd-continuous-init", "avg-degree", "mean-continuous-init-add", "bias-additionnal", "type-ind-biased", "mean-report", "sd-report"))
+
+colnames(df3) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "assortativity", "init", "neighbors", "mean_added", "hetero_type", "feature_biased", "mymean", "mysd")
+df3$feature_biased <- "none"
+df3$mean_added <- 0.2
+
+df4 <- df3
+df4$mean_added <- 0.5
+
+
+df <- rbind(df1, df2, df3, df4)
+
+df <- df[order(rep_id),]
+
+df_all <- data.frame(matrix(0, ncol = 12, nrow = 0))
+colnames(df_all) <- c("rep_id", "size_net", "clus_coeff",  "pathlength", "init_mode", "neighbors",  "assortativity", "init", "mean_mean", "sd_mean", "mean_sd", "sd_sd")
+
+for (size in unique(df$size_net)){
+  # print(paste("Size:", size))
+
+  df_bis <- df[df$size_net==size,]
+  # number of people in the network, -1, because it starts with zero
+  nb_people = size - 1
+  colna <- paste("Person", as.character(c(nb_people:0)), sep="")
+
+  # create table with only mean
+  df_mean <- data.frame(df_bis$mymean)
+  cols <- names(df_mean)
+  setDT(df_mean)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_mean, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_mean <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_mean) <- colna
+  # print("mean done!")
+
+  # create table with only sd
+  df_sd <- data.frame(df_bis$mysd)
+  cols <- names(df_sd)
+  setDT(df_sd)[, (cols) := lapply(.SD, function(x) stri_sub(x, 2, -2))]
+  write.table(df_sd, paste(pathfile_output, pathfileout, sep=""), sep="  ", col.names=FALSE, row.names=FALSE, quote=FALSE)
+  df_sd <- fread(paste(pathfile_output, pathfileout, sep=""), header=F, sep=" ", fill=TRUE, skip=0)
+  colnames(df_sd) <- colna
+  # print("sd done!")
+
+
+  # add interests values to df
+  df_bis$mean_mean <- rowMeans(df_mean)
+  df_bis$mean_sd <- rowMeans(df_sd)
+  df_bis$sd_mean <- transform(df_mean, SD=apply(df_mean,1, sd, na.rm = TRUE))$SD
+  df_bis$sd_sd <- transform(df_sd, SD=apply(df_sd,1, sd, na.rm = TRUE))$SD
+
+  # remove heavy columns in df
+  df_bis <- df_bis[,!(c("mymean", "mysd"))]
+
+  # add to a big df
+  df_all <- rbind(df_all, df_bis)
+}
+
+df_merge <- df_all
+
+```
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE, fig.width=8}
+
+value_neigh = 4 # 4 or 20
+value_size = 50 # 50 of 150
+```
+
+
+
+### Mean language
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE, fig.width=8}
+
+mean_ran_01_02 <- median(df_merge$mean_mean[df_merge$init==0.1 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_02 <- median(df_merge$mean_mean[df_merge$init==0.5 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_01_05 <- median(df_merge$mean_mean[df_merge$init==0.1 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_05 <- median(df_merge$mean_mean[df_merge$init==0.5 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+
+df_merge %>%
+  mutate(feature_biased = case_when(feature_biased == "assor" ~ "Assortativity",
+                                    feature_biased == "centbet" ~ "Between cent",
+                                    feature_biased == "centclos" ~ "Close cent",
+                                    feature_biased == "centeigen" ~ "Eigen cent",
+                                    feature_biased == "cluscoeff" ~ "Clustering",
+                                    feature_biased == "pathlen" ~ "Pathlength",
+                                    feature_biased == "none" ~ "None"),
+         mean_added = case_when(mean_added==0.2 ~ "Bias different",
+                                mean_added==0.5 ~ "Bias similar"),
+         init = case_when(init==0.1 ~ "Initial lang",
+                          init==0.5 ~ "Emergent lang")) -> df_merge2
+
+
+dummy <- data.frame(mean_added = c("Bias different", "Bias similar", "Bias different", "Bias similar"),
+                    init = c("Initial lang", "Initial lang", "Emergent lang", "Emergent lang"),
+                    value_mean = c(mean_ran_01_02, mean_ran_01_05, mean_ran_05_02, mean_ran_05_05 ))
+
+
+ggplot(df_merge2[df_merge2$neighbors==value_neigh & df_merge2$size_net==value_size,], aes(x=feature_biased, y=mean_mean, fill=hetero_type)) +
+  facet_grid(mean_added ~ init) +
+  geom_hline(data=dummy, aes(yintercept= value_mean), linetype="dashed") +
+  geom_boxplot() +
+  theme_bw(base_size=15) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  labs(x="Feature biased", y="Std intra-ind variation", fill="Type")
+  #scale_fill_viridis_d(begin=0.2)
+
+
+```
+
+
+
+### Intra-ind variation
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE, fig.width=8}
+
+
+mean_ran_01_02 <- median(df_merge$mean_sd[df_merge$init==0.1 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_02 <- median(df_merge$mean_sd[df_merge$init==0.5 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_01_05 <- median(df_merge$mean_sd[df_merge$init==0.1 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_05 <- median(df_merge$mean_sd[df_merge$init==0.5 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+dummy <- data.frame(mean_added = c("Bias different", "Bias similar", "Bias different", "Bias similar"),
+                    init = c("Initial lang", "Initial lang", "Emergent lang", "Emergent lang"),
+                    value_mean = c(mean_ran_01_02*1000000, mean_ran_01_05*1000000, mean_ran_05_02*1000000, mean_ran_05_05*1000000 ))
+
+
+ggplot(df_merge2[df_merge2$neighbors==value_neigh & df_merge2$size_net==value_size,], aes(x=feature_biased, y=mean_sd*1000000, fill=hetero_type)) +
+  facet_grid(mean_added ~ init) +
+  geom_hline(data=dummy, aes(yintercept= value_mean), linetype="dashed") +
+  geom_boxplot() +
+  theme_bw(base_size=15) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  labs(x="Feature biased", y="Intra-ind variation", fill="Type")
+  #scale_fill_viridis_d(begin=0.2)
+
+```
+
+### Std intra-ind variation
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE, fig.width=8}
+
+mean_ran_01_02 <- median(df_merge$sd_sd[df_merge$init==0.1 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_02 <- median(df_merge$sd_sd[df_merge$init==0.5 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_01_05 <- median(df_merge$sd_sd[df_merge$init==0.1 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_05 <- median(df_merge$sd_sd[df_merge$init==0.5 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+
+dummy <- data.frame(mean_added = c("Bias different", "Bias similar", "Bias different", "Bias similar"),
+                    init = c("Initial lang", "Initial lang", "Emergent lang", "Emergent lang"),
+                    value_mean = c(mean_ran_01_02*1000000, mean_ran_01_05*1000000, mean_ran_05_02*1000000, mean_ran_05_05*1000000 ))
+
+
+ggplot(df_merge2[df_merge2$neighbors==value_neigh & df_merge2$size_net==value_size,], aes(x=feature_biased, y=sd_sd*1000000, fill=hetero_type)) +
+  facet_grid(mean_added ~ init) +
+  geom_hline(data=dummy, aes(yintercept= value_mean), linetype="dashed") +
+  geom_boxplot() +
+  theme_bw(base_size=15) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  labs(x="Feature biased", y="Std intra-ind variation", fill="Type")
+  #scale_fill_viridis_d(begin=0.2)
+
+
+```
+
+
+### Inter-ind variation
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE, fig.width=8}
+
+mean_ran_01_02 <- median(df_merge$sd_mean[df_merge$init==0.1 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_02 <- median(df_merge$sd_mean[df_merge$init==0.5 & df_merge$mean_added==0.2 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_01_05 <- median(df_merge$sd_mean[df_merge$init==0.1 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+mean_ran_05_05 <- median(df_merge$sd_mean[df_merge$init==0.5 & df_merge$mean_added==0.5 & df_merge$neighbors==value_neigh & df_merge$size_net==value_size & df_merge$hetero_type=="random"])
+
+
+dummy <- data.frame(mean_added = c("Bias different", "Bias similar", "Bias different", "Bias similar"),
+                    init = c("Initial lang", "Initial lang", "Emergent lang", "Emergent lang"),
+                    value_mean = c(mean_ran_01_02*10000, mean_ran_01_05*10000, mean_ran_05_02*10000, mean_ran_05_05*10000 ))
+
+
+ggplot(df_merge2[df_merge2$neighbors==value_neigh & df_merge2$size_net==value_size,], aes(x=feature_biased, y=sd_mean*10000, fill=hetero_type)) +
+  facet_grid(mean_added ~ init) +
+  geom_hline(data=dummy, aes(yintercept= value_mean), linetype="dashed") +
+  geom_boxplot() +
+  theme_bw(base_size=15) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  labs(x="Feature biased", y="Inter-ind variation", fill="Type")
+  #scale_fill_viridis_d(begin=0.2)
+
+```
+
+## MERGE all dataset 3's files together 
+
+### Multinomial
+
+Merge the "variation" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read scalefree files
+filename = "Heterogenous/D3_dirichlet_scalefree_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$rewire <- NA
+df1 <- df1[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "where_bias","level_bias","who_biased","percent_bias","bet_biased","bet_unbiased", "clus_biased","clus_unbiased","eigen_biased","eigen_unbiased","clos_biased","close_unbiased","assor_biased" , "assor_unbiased", "deg_biased", "deg_unbiased", "rewire", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read random file
+filename = "Heterogenous/D3_dirichlet_random_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$exponent <- NA
+df2$rewire <- NA
+df2 <- df2[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "where_bias","level_bias","who_biased","percent_bias","bet_biased","bet_unbiased", "clus_biased","clus_unbiased","eigen_biased","eigen_unbiased","clos_biased","close_unbiased","assor_biased" , "assor_unbiased", "deg_biased", "deg_unbiased", "rewire", "klb", "mean_entrop_jef", "std_entrop_jef")]
+
+# Read smallworld file
+filename = "Heterogenous/D3_dirichlet_smallworld_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+df3$exponent <- NA
+df3 <- df3[, c("rep_id", "network", "size_net", "clus_coeff", "pathlength", "init_mode", "assortativity", "exponent", "init", "neighbors", "where_bias","level_bias","who_biased","percent_bias","bet_biased","bet_unbiased", "clus_biased","clus_unbiased","eigen_biased","eigen_unbiased","clos_biased","close_unbiased","assor_biased" , "assor_unbiased","klb", "deg_biased", "deg_unbiased", "rewire", "mean_entrop_jef", "std_entrop_jef")]
+
+# merge all files
+df <- rbind(df1, df2, df3)
+
+# rename columns
+colnames(df) <- c("rep_id","network_type", "size", "clustering", "pathlength", "value_lang_start", "assortativity", "exponent", "init_lang_exp", "node_degree","utt_biased","level_bias","metric_biased","percent_bias","bet_biased","bet_unbiased", "clus_biased","clus_unbiased","eigen_biased","eigen_unbiased","close_biased","close_unbiased","assor_biased" , "assor_unbiased", "deg_biased", "deg_unbiased", "rewire", "inter_var", "mean_intra_var", "std_intra_var")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)")) -> df
+
+df %>%
+  mutate(metric_biased = case_when(metric_biased == "degree" ~ "Degree",
+                                metric_biased == "centbet" ~ "Betweenness c.",
+                                metric_biased == "centclos" ~ "Closeness c.",
+                                metric_biased == "centeigen" ~ "Eigenvector c.",
+                                metric_biased == "cluscoeff" ~ "Clustering",
+                                metric_biased == "random" ~ "Random",
+                                metric_biased == "assor" ~ "Assortativity",
+                                metric_biased == "none" ~ "No biased agents"),
+         level_bias = case_when(level_bias == "highest" ~ "Highest",
+                                   level_bias == "lowest" ~ "Lowest",
+                                   level_bias == "none" ~ "None",
+                                   level_bias == "random" ~ "Random")) -> df2
+
+# Write file
+pathfile <- paste(path, "Summary/DATASET3_dirichlet_variation", pathfileout, sep="")
+write.csv(df2, pathfile, row.names = F)
+
+
+```
+
+Merge the "language" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Scalefree
+filename = "Heterogenous/D3_dirichlet_scalefree_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$rewire <- NA
+
+# Random
+filename = "Heterogenous/D3_dirichlet_random_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$rewire <- NA
+
+# Smallworld
+filename = "Heterogenous/D3_dirichlet_smallworld_lang_merge"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+
+# Merge the 3 datasets
+df <- rbind(df1, df2, df3)
+
+# Rename columns
+colnames(df) <- c("utterance","init_lang_exp", "percent_bias", "utt_biased", "level_bias", "metric_biased", "size_net", "mean_cond", "std_cond", "network_type", "rewire")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)")) -> df
+
+df %>%
+  mutate(metric_biased = case_when(metric_biased == "degree" ~ "Degree",
+                                metric_biased == "centbet" ~ "Betweenness c.",
+                                metric_biased == "centclos" ~ "Closeness c.",
+                                metric_biased == "centeigen" ~ "Eigenvector c.",
+                                metric_biased == "cluscoeff" ~ "Clustering",
+                                metric_biased == "random" ~ "Random",
+                                metric_biased == "assor" ~ "Assortativity",
+                                metric_biased == "none" ~ "No biased agents"),
+         level_bias = case_when(level_bias == "highest" ~ "Highest",
+                                   level_bias == "lowest" ~ "Lowest",
+                                   level_bias == "none" ~ "None",
+                                   level_bias == "random" ~ "Random")) -> df2
+
+# Write table
+pathfile <- paste(path, "Summary/DATASET3_dirichlet_language", pathfileout, sep="")
+write.csv(df2, pathfile, row.names = F)
+
+```
+
+
+Merge the "language" files:
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+# Scalefree
+filename = "Heterogenous/D3_dirichlet_scalefree_lang_merge_bis"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df1 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df1$network <- "Scalefree"
+df1$rewire <- NA
+
+# Random
+filename = "Heterogenous/D3_dirichlet_random_lang_merge_bis"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df2 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df2$network <- "Random"
+df2$rewire <- NA
+
+# Smallworld
+filename = "Heterogenous/D3_dirichlet_smallworld_lang_merge_bis"
+pathfile <- paste(path, filename, pathfileout, sep="")
+df3 <- fread(pathfile, header=T, sep=",", fill=TRUE)
+df3$network <- "Small-world"
+
+# Merge the 3 datasets
+df <- rbind(df1, df2, df3)
+
+# Rename columns
+colnames(df) <- c("rep_id", "utterance","init_lang_exp", "percent_bias", "utt_biased", "level_bias", "metric_biased", "size_net", "mean_cond", "std_cond", "network_type", "rewire")
+
+# change values for better clarity
+df %>% mutate(init_lang_exp = case_when(init_lang_exp == 0 ~ "Without",
+                                        init_lang_exp == 5 ~ "With (weak)",
+                                        init_lang_exp == 20 ~ "With (strong)")) -> df
+
+df$metric_biased <- as.character(df$metric_biased)
+
+df$metric_biased[df$level_bias=="random"] <- "random"
+df$metric_biased[df$level_bias=="none"] <- "none"
+df$where_bias[df$level_bias=="none"] <- 7
+
+df %>%
+  mutate(metric_biased = case_when(metric_biased == "degree" ~ "Degree",
+                                metric_biased == "centbet" ~ "Betweenness c.",
+                                metric_biased == "centclos" ~ "Closeness c.",
+                                metric_biased == "centeigen" ~ "Eigenvector c.",
+                                metric_biased == "cluscoeff" ~ "Clustering",
+                                metric_biased == "random" ~ "Random",
+                                metric_biased == "assor" ~ "Assortativity",
+                                metric_biased == "none" ~ "No biased agents"),
+         level_bias = case_when(level_bias == "highest" ~ "Highest",
+                                   level_bias == "lowest" ~ "Lowest",
+                                   level_bias == "none" ~ "None",
+                                   level_bias == "random" ~ "Random")) -> df2
+
+
+pathfile <- paste(path, "Summary/DATASET3_dirichlet_language_2", pathfileout, sep="")
+write.csv(df2, pathfile, row.names = F)
+
+```
+
+
+
+

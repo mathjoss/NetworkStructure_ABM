@@ -1,0 +1,10 @@
+In this folder, you can find all input files.
+Only the folder 'images' is used for printing pictures in the final Rmarkdown html file.
+
+The data was obtained the following way:
+
+ 1. First, data was generated using the Netlogo program (see NetworkStructure_Variation.nlogo file in the main folder) and available in the "Raw" folder. For replication, it is possible to open this Netlogo file, open BehaviorSpace, then all setting are already pre-registered - look at the Appendix in the final Rmarkdown file for more information on how to generate these simulations)
+ 2. Then, this data was cleaned using "CleanData.Rmd". It consists on extracting the different measures we want to analyse (such as measure of variations) from all the Dirichlet vector of the agents. All information are available in this file. This cleaned data was stored in different folders according to the type of simulations done: "Multinomial" (Dataset 1 and 2 using Multinomial language only), "Continuous" (Dataset 1 and 2 using Continuous language only), "Heterogenous" (Dataset 3), and Timeline (none of these dataset, just a sanity check to look at the evolution of language with time).
+ 3. After the data was cleaned, it was aggregated in the same files (see again "CleanData.Rmd" for more information on it) for simplicity. 
+ 
+ 

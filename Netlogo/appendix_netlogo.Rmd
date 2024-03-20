@@ -1,0 +1,354 @@
+---
+title: "Appendix_Netlogo"
+author: "Mathilde Josserand"
+date: "2023-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# APPENDIX: NETLOGO GUIDE
+
+IMPORTANT NOTE: if you just want to replicate, no need to read all these explanations. You can just perform the following steps:
+
+ - open the file `NetworkStructure_Variation.nlogo` on Netlogo
+ - select "Tools"
+ - select "BehaviorSpace"
+ - select the type of simulation you want to run, and click on "Run"
+ 
+Reminder: if you want to generate the Dataset 1, with dirichlet language, in scale-free networks, you should select "D1_dir_scalefree". 
+
+The part below is created in case of you would like to experiment new conditions and new parameters.
+ 
+## BehaviorSpace
+
+BehaviorSpace is a software tool integrated with NetLogo that allows you to perform experiments with models. BehaviorSpace runs a model many times, systematically varying the model’s settings and recording the results of each model run. This process lets you explore the model’s “space” of possible behaviors and determine which combinations of settings cause the behaviors of interest.
+After opening the Netlogo model, you can use BehaviorSpace in «*Tools*», «*BehaviourSpace*». BehaviorSpace use is quite intuitive and will not be explained here. In the next part, I will explain the role of each variable in our Netlogo’s model.
+
+All analysis are pre-entered in Behavior Space. In order to replicate one of our simulation, you just have to click on the desired simulations and then click on "Run".
+
+<img src="./Inputfiles/images/netlogo.jpg" alt="Explaination of dynamicity" style="height:in;"/>
+
+## Generating a network
+
+Before generating a network, it is necessary to *setup-clear* the environment. 
+
+
+### Num-agents.
+
+Then, you can set the number of agents you want in this network (*num-agents*). In theory, you can select any number of agents > 2. In practice, data visualization will not be efficient for more than ~ 500 agents. In BehaviorSpace, and depending on the computer used, you can go up to 1000 agents without any computational problems, and 2000 agents if the number of conditions is not too high. Also in practice, selecting a number of agents too low (such as n=2) will crash the program, because then the assortativity can not be computed. If you want to select a very low number of agents, then we suggest you comment on the line for assortativity.
+
+*Note*: if you want to select a very low number of agents (< 5), be careful to select the option « *On* » for choose-N-influent. Otherwise, if selected « *Off* », the program will try to give more 2 times more bias for central agents, but as it is impossible with 2 agents, it will keep looking for alternatives and eventually crash.
+
+###  Directed/Undirected links.
+
+In Other parameters, select « *directed* » or « *undirected* » in the box « *links-to-use* ». The default option is *undirected.* Please note that some additional options (centrality check, …) have been created only for *undirected* networks; if you want to use *directed* agents, there might be some problems (will require some more coding :) )
+
+### Synchronicity.
+
+Selecting the option "on" will make the network *synchroneous*; in the off mode, the network will be *asynchroneous.* 
+More concretely, in a synchroneous network, the new language value of all nodes will be updated at the same time at the end of the tick, after all agents have talked once. 
+In an asynchroneous network, the language value of the agents will be updated immediately after they hear the utterance.
+
+
+### Layout.
+
+The layout affects the disposition of the agents for data visualization. It is useless to select this parameter in BehaviorSpace. You can select 4 layout options: « *spring* », « *circle* », « *radial* », « *tutte* ». 
+
+It is recommended to use the following parameters: *radial* for Scale-free, wheel and star network, *circle* for Random, small-world and ring networks. *Spring* layout can be a good alternative when plotting many types of networks. 
+
+The two buttons « *layout* » and « *layout once* » allow you to reset the layout once the network has been created. « *Layout* » will continuously reset the layout (useful for dynamic network) whereas « *layout once* » will reset the layout only once.
+
+### Dynamicity.
+
+On the bottom left, there are several boxes under the note « Dynamic network parameters ». The default option is a static network, namely a network where *proba-rewire* = 0. 
+
+*Proba-rewire* determines the probability to rewire, at each tick and for each agent. The total number of links remains the same throughout the process. The algorithm was built using the following algorithm:
+
+ -  for each agent, select a Random float R between 0 and 1: if R < proba-rewire, then start rewiring process for the selected agent i. 
+
+ -  affect values for all agents in the network according to the selected agent $i$:
+      - the *distance* (=shortest path) between each agent and agent i. If no possible path exists, value 0 is affected.
+      - the *similarity of the language value* between each agent and agent i. Here, similarity = absolute value of (language value of agent i - language value of other agents).
+      - the *centrality* of agents (do not depend on agent i). Now, it uses betweenness centrality measure but this can be easily changed for other centrality measures.
+      
+ -  normalize centralize these numbers so all measures vary between 0 and 1.
+
+ -  compute the overall probability of agent i to rewire with other agents. It uses the following formula: **(distance*import-dist + similarity-language-value*import-lang + centrality*import-central) / (import-dist + import-central + import-lang)**
+The values for import-dist, import-lang and import-central are manually selected by the user and represent weights that can be affected to each previously computed probability: for example, one can select higher importance of connecting with agents having a high centrality. 
+
+ -  Then, it selects Randomly a agent $p$ according to this probability, randomly remove one link of agent $i$, and wire the agent $i$ with agent $p$.
+
+<img src="./Inputfiles/images/example_dynamicity.png" alt="Explaination of dynamicity" style="height:in;"/>
+
+In this example, agent $i$ has a probability of 0.9 to rewire with agent $G$, and a probability of 0.175 to rewire with agent $H$. As agent $i$ only has one neighbor (agent $F$), the link between agent $i$ and agent $F$ will be removed and we can imagine that a new link between agent $i$ and $G$ will be created.
+
+Please note that dynamicity breaks the structure of scale-free network. Setting a high value for import-central will slow down this process but it will eventually look like a Random network after many ticks. 
+
+**IMPORTANT NOTE:** in this paper, we did not use this function. 
+
+### Network generation 
+
+Please note that in BehaviorSpace, whereas all variables (num-agents, etc) must be entered in the first box « vary variables », the network generation must be entered in setup commands.
+
+So, in setup commands, you must enter first *setup-clear* and then the name of the network you want to generate (*Random* for example). You have several options :
+
+-  *Random* network: implies to select the *connection-prob*
+-  *Small-world* network: according to watts-strogatz algorithm. Implies to select the *neighborhood-size* (the number of neighbors with whom each agent is connected at first) and the *rewire-prob* (the probability for each agent of rewiring after the initial condition has been set up).
+- *preferential attachment*: Scale-free network, according to Barabasi algorithm.
+- *ring*: each agent is connected to only one agent. Exactly the same as a scale-free with neighborhood-size=1 and rewire-prob = 0. 
+- *language-contact*: a "home-made" algorithm (that is very similar to pre-existing algorithms) where you build your own network around cliques. You select the number of cliques (*nb-family*) and the number of agents per clique (*family-size*) (please note that the number of agents depends of these parameters and not on *num-nodes*!). The program will created fully connected cliques, and then add some links (based on your selection in *nb-link-extra*) between these cliques. To do so, the program goes in each clique, then it chose one random agent in this clique and connect this agent to any other agent not in the same clique. It repeats the process $n$ times based on how many *nb-link-extra* you chose. Note: this part is not fully ready yet, because right now it can select the same agent several times). Advice: to visualize your click, better to select a "spring" layout and click on the button "Layout".
+- *assort scale-free*. This program creates a scale-free network, and  then adds *nb-additional-link* links between turtles based on the *high-assort* parameters: if this parameters is set to "yes", then it will put these new links to increase the total assortativity (so it will connect popular agents to popular agents and lonely agents to lonely agents). If it is set to "no", the program will position the new links so that the total assortativity is lower (connect the lonely agents to the popular agents).
+- *star*: a central agent exists, relied with all agents. Other agents are only connected with this central agent.
+- *wheel*: same as star, except that not-central agents are also connected with their neighbors.
+- there are also other options such as *small-world lattice* (lattice-2d, kleinberg) algorithms, but this option is not perfectly working now (it does not fit to the number of agents previously entered but with the options nb-rows, nb-cols, and clustering-exponent).
+
+
+More info at [here](https://ccl.northwestern.edu/netlogo/docs/nw.html).
+
+There are also buttons to **detect communities**, to show **agents centralities**, show **clusters** and **save matrix**. 
+
+## Choose communication algorithm
+
+First, you need to select the communication algorithm. You have several options. Some of them are based on Bayesian communication, some not.
+
+### Individual algorithm
+
+Each tick, affect to the agent the language value of one randomly selected neighbor. 
+
+(borrowed from Language Change model library)
+
+### Threshold algorithm
+
+(works with *threshold-val* and *sink-state-1* options): 
+
+ -  sum the language value of all neighbors
+ -  if this sum is > the number of neighbors * threshold-val, then affect language-value to 1. 
+ -  if you affected *sink-state-1 to Off*,  and this sum is < the number of neigbors * threshold val, then affect language-value to 0. 
+
+(borrowed from Language Change model library)
+
+### Reward algorithm
+
+(works with *value-bias* and *logistic*):
+
+ -  affect to agents either a value-bias = 0 for population 0, or = value-bias (manually selected by the experimenter) for population 1.
+ 
+ -  Create utterances according to the internal value-bias: 
+      - if logistic: create a value: (1 / (1 + exp ( - ((value-bias+0.1)*20*language-value – 1) * 5)) → basically, it means that if you are non biased (value-bias = 0), you produce utterance according to the internal value of your language, but if you’re biased, you tend to product more utterance = 1. 
+      - if not logistic: agents produce utterance only according to their internal language value (no bias toward the feature)
+      
+ -  Listen to utterances spoken by neighbors: change your internal language value according to the neighbors’ utterances.
+ 
+ (borrowed from Language Change model library)
+
+### Probabilistic algorithm
+
+(works with *value-bias-for-state1* and *value-bias-for-state-0* for binary option, and *min-value-bias* and *max-value-bias *for continuous option)
+
+ -  **Speak**: extract 30 utterances according to binomial function with the language-value as the probability. The spoken-state is the mean of the 30 utterances. Contrary to reward algorithm, speaking is not affected by the bias.
+ 
+ -  **Listen** using the following formula: 
+      - ifelse heard-state >= language-value
+      - new-lang-value = ( language-value + ( abs(language-value - heard-state) * value-bias-for-state-0 ) )
+      - new-lang-value =  ( language-value - ( abs(language-value - heard-state) * (value-bias-for-state-0 for non-biased agents; value-bias-for-state-1 for biased agents) ) )
+
+Consequently, biased agents have a tendency to decrease less their internal value of language when they hear utterance lower than their internal value of the language compared to non-biased agents. 
+
+### Bayesian algorithm: BINARY feature 
+
+This can be selected with *update-algorithm* = SAM ou MAP. 
+(works with *learning-acceptance1*, *learning-acceptance0*, *init-langval-0* and *init-langval-1*)
+
+ -  The parameters *learning-acceptance* and *init-langval-1* are used in another R script to generate alpha and beta values for a Beta distribution. The code works in Netlogo; but because it was often crashing with BehaviorSpace, I just extracted the alpha and beta value of interests and copy-pasted in Netlogo. According to those values, each agent is initialized with a Beta distribution than will be modified according to the utterances heard. 
+ 
+ -  **Speak**: two options can be set:
+ 
+      - **MAP**:
+      
+            - extract the value of the mode of the Beta distribution;
+            
+            - use the binomial function to extract an utterance from this probability
+            
+      - **SAM**:
+      
+            - extract a Random number from the Beta distribution;
+            
+            - use the binomial function to extract an utterance from this probability
+            
+
+ -  **Listen**: the same for both MAP and SAM algorithms
+ 
+      - Update the Beta distribution using the following formula:
+      
+            - new alpha = alpha + utterance heard (= 0 or 1), 
+            
+            - new beta  = beta + 1 – utterance heard  (= 0 or 1)
+
+### Bayesian algorithm: MULTINOMIAL feature 
+
+This can be selected with *update-algorithm* = dirichlet. It works together with the following options:
+
+ - *vec-dirichlet*: whether the spoken words is a mix of utterances (and then can be seen as a vector: for example the agent pronounces o=(0.1, 0, 0, 0.6, 0.3, 0, 0, 0)). This corresponds to *vec-dirichlet*=True. The other condition is *vec-dirichlet*= False and it corresponds to the situation where the spoken word is only one utterance. For example, an agent can pronounces $u_4$, which is equivalent to o=(0,0,0,1,0,0,0,0,0).
+
+Please note that with this communication algorithm, only the SAM algorithm option is provided.
+
+### Bayesian algorithm: CONTINUOUS feature 
+
+This can be selected with *update-algorithm* = continuous-SAM or continous-MAP. It works together with the following options:
+
+ - *mean-continuous-init*: the mean of the normal distribution possessed by the agents at first
+ - *sd-continuous-init*: the sd of the normal distribution possessed by the agents at first
+ - *fixed-value-sd*: the sd of the utterances that will be heard. While the mean of the heard utterances will vary, creating the variation, we keep the sd fixed.
+ 
+The two first parameters are fixed, so at birth, every agent have the same normal distribution. For creating variation, we make these agents listen to some utterances. 
+
+#### Listen twice new button!
+
+This button allows you to make each agent speaks **twice** each round. Consequently, its neighbors will hear twice. It has been tested only with the Multinomial part: it may not works with Binomial or Continuous feature...
+
+
+## Affect initial language values
+
+There are different options for the language values:
+
+- the one used in our previous model, where language is **binary** (conjugate prior: Beta distribution). It is related to the *update-algorithm" = SAM or MAP.
+- the one used in this model, where language is **multinomial** (conjugate prior: Dirichlet distribution). It is related to the *update-algorithm" = dirichlet. We use only the SAM strategy. 
+- another one used in this model, where language is **continuous** (conjugate prior: Normal distribution). It is related to the *update-algorithm" = continuous-SAM or continuous-MAP
+
+### With binary language
+
+**Initial value of the society’s language**
+
+This part applies only to Bayesian communication algorithms. First of all, you need to select the initial value of the society’s language. Before it starts, each agent will hear a fixed number of utterances (*total-numb-utt*). If you do not want to have any initial value of the society language, affect 0 to *total-numb-utt*.  
+
+Then, you need to select the number of utterance = 1 heard (*number-utt-heard-start*) among the N *total-numb-utt*. For example, for non-biased agents, if they hear 3 utterances = 1 (*number-utt-heard-start* = 3) out of 4 utterances (*total-numb-utt*), these non-biased agents will start with an a-priori language tending toward possessing the feature. 
+
+**Random initial value language**
+
+The agents can start with a language value which is determined by the bias (*Random-initial-lang-value = Off)*, or with chosen Random initial values for the language (*Random-initial-lang-value = On*).  
+
+For Bayesian algorithm, we recommend to start with language value determined by the bias. 
+For non-Bayesian communication algorithm, such as probabilistic algorithm, setting this value to « *on* » allows settling the initial value of the society language. Now, it is only possible to affect values according to a normal distribution but it can easily be changed for other types of distributions. You can set *initial-value-language* and the *standard-dev* of the normal distribution; if you want all agents to have the same value, set standard-dev = 0. 
+
+For non Bayesian communication algorithms, it is also possible to set the values for a unbiased value of the feature. We recommend affecting the same value to the unbiased. 
+
+### With multinomial language
+
+#### Initial state of language
+
+ - *nb-of-categories*: number of categories (here, called **utterances**) in this multinomial vector. During the analysis, we set this number to 10 but it can be set to any other number (>2). 
+
+All utterances will be initialized with the value 1. For example, $v=(1,1,1,1,1,1,1)$ if *nb-of-categories* = 7.
+
+#### Adding initial language exposure
+
+After all agents are born with their language, we can add a value of *initial language exposure*, namely, whether they are exposed to a language which already favor a certain utterance or not. Please refer to the [METHOD] for more information. 
+
+ - *init-dirichlet* shows the number of utterances that will be heard at birth. It can take any values.
+ - *value-init-dirichlet* shows the number of the utterance (for example, 4 designates $u_4$, 7 designates $u_7$) that will be biased, namely, the utterances that will be heard at birth. 
+
+### With continuous language
+
+After all agents are born with their language, we can add a value of *initial language exposure*, namely, whether they are exposed to a language which already favor a certain utterance or not. Please refer to the [METHOD] for more information. 
+
+In this part, unfortunately, we **did not** program that yet. Indeed, we did not find a good theoretical way to model a population which does not have a bias toward any utterance at birth. 
+While in the multinomial part, all agents start with the same prior, it was impossible here to have a flat normal distribution. 
+
+#### Redistribute/reset buttons 
+
+If you want to re-use exactly the same language-values as the one you have just used, use *reset language value*.
+
+If you want to redistribute language values in the same network (give new language values), use the button *redistribute language values*.
+
+## Affect internal bias (for binary bias only!)
+
+First of all, you need to select if you want *binary* or *continuous* bias. If you want to split the population into 2 parts: agents biased with a X bias and agents biased with a Y bias (could be non-biased), use *binary bias*. If you want the population to be continuously biased on a range from 0 to 1, use *continuous bias*.
+
+For now, with Bayesian communication algorithms, the program only handles *binary bias*. 
+
+### Continuous bias (only for non-Bayesian)
+
+You have two options: either set Random continuous states (*is-state-Random = On*) or manually choose the distribution of the continuous states (*is-state-Random = Off*). 
+
+If you set this option to *On*, there is no need to fill the other boxes below. 
+
+If you set this option to *Off*, you select the shape of the distribution for the states *(distribution-state*). Then, according to the distribution chosen, you can select the parameters of the curve. For example, if you selected a gamma distribution, you only need to select the options « *alpha-if-gamma* » and « *lambda-if-gamma* ». 
+
+The last option (*exactly-same-for-unbiased*) will affect the same values for the unbiased bias. Now, the option for which you can manually select the values for the unbiased bias has not been coded yet.
+Please note that you can visualize the distribution of the state in the graph below. 
+
+## Heterogenous population
+
+### Bayesian algorithm: BINARY feature
+
+Use this if you want to split the population into 2 parts. 
+
+First, affect the value of the bias for population 1 (*init-langval-1*) and the value of the bias for population 0 (*init-langval-0*). Please note that if you want to have a biased population and a non-biased population, the biased population must always be the population 1. Indeed, the centrality measures are computed with this population.
+
+Second, select the percentage of agents in population 1 (*percent-state-1*). There is also a unbiased bias for which you can select an other percentage unbiased. The bias unbiased has not been coded for Bayesian algorithms.
+
+Third, select how you want the bias to be distributed according to the agents’ centrality. There are two options: select the bias according to the most influential agents (*choose-N-influent = On*), or select the bias according to the ratio of centrality (*choose-N-influent=Off*).
+
+**choose-N-influent = On**: You can use this option with any type of network. If you select this option, you must enter the number of the most influent agent that will have the bias *init-langval-1*. This number must always be inferior to number of agents in population 1 (percent-state-1 * num-agents): in Netlogo, the cursor will automatically adapt but in BehaviorSpace, make sure not to enter a too high number. The algorithm works this way:
+
+ -  affect init-langval-0 to all agents
+ -  find most influential agents (now, it uses eigenvector centrality but it can be easily changed in the code)
+ -  affect init-langval-1 to the *N-influent* most influential agents selected by the user. For example, if this *N-influent=2*, the 2 most influential agents in the network will have init-langval-1.
+ -  affect randomly *init-langval-1* to the rest of the agents, so that the number of agents with *init-langval-1* fits the *percent-state1*.
+
+**choose-N-influent = Off:** You can select this option only with Scale-free networks. If you select this option, you must enter the *ratio-centrality-Scale-free* that you want to see. This ratio means that the centrality of the agents with *init-langval-1* must be X times higher than the mean centrality of the agents with *init-langval-0*.  The algorithm works this way:
+
+ -  affect *init-langval-0* to all agents
+ -  « while » loop :
+      - randomly affect *init-langval-1* in the network;
+      - compute the mean centrality for agents with *init-langval-1* and *init-langval-0*;
+      - if the ratio mean centrality of population 1 agents = ratio-centrality-Scale-free * mean centrality of population 0 agents +/- 0.01 (we added 0.01 in order to have a loop which runs faster...), then break the loop. If not, redo everything. 
+      
+The while loop works relatively fast thanks to the addition/subtraction of 0.01. For data visualization, it is easy to test a high ratio, such as 5 or 6. However, in BehaviorSpace, as we run many iterations, affecting a too high value for the ratio can make the program crash. We recommend to use ratio-centrality = 1 or 2. 
+
+If you don’t want to make this centrality parameter vary, you have 2 options:
+
+ -  set *choose-N-influent = On* and *N-influent = 0*: in this case, *init-langval-1* will be affected randomly in the population;
+ -  set *choose-N-influent = Off* and *mean-centrality = 1*: this is different than the previous case, in that the mean centrality of agents with *init-langval-1* and with *init-langval-0* will be approximately the same.
+For many replications, the 2 options are equivalent but the first option is recommended, because computationally less expensive.
+
+Same as for language-value, you can *reset* or *redistribute states*.
+Please note that you can visualize the mean centrality of agents with state = 1 and state = 0.
+
+### Bayesian feature: MULTINOMIAL & CONTINUOUS
+
+Here, we can split the population in two groups based on their characteristics.
+
+There are several options, using the variable *bias-additionnal*:
+
+ - selecting it to *none*: noone will be biased and there are going to be an homogenous population
+ - selecting it to *random*: a **random** percentage N of the population will be biased
+ - selecting it to *highest*: the N% agents with the **highest** value of the characteristic C will be biased
+ - selecting it to *lowest*: the N% agents with the **lowest** value of the characteristic C will be biased
+
+It is possible to choose the value of this percentage N with the variable *percent-bias*. Careful! This variable has to be written in a percentage out of 100 (and not out of 1).
+
+The type of characteristics to be biased can be selected using the variable *type-ind-biased*:
+
+ - *cluscoeff*: clustering coefficient
+ - *pathlen*: pathlength (actually, this variable is extremely similar to the *centclos*. I saw it after programming it so it is still here, but it does not make sense to use both of them.)
+ - *centbet*: betweenness centrality
+ - *centeigen*: eigenvector centrality
+ - *centclos*: closeness centrality
+ - *assor*: assortativity (it is questionable to use this as well, as most assortative agents can be either the agents with the highest or lowest assortativity. Thus, we did not use it in our final analysis)
+ - *degree*: number of neighbors 
+ 
+You can find more information about these characteristics in [METHOD], in the subpart [Looking at *local* network structure].
+
+#### MULTINOMIAL
+
+ - *init-dirichlet-add* shows the number of utterance that will be heard by the agents before starting communication.
+ - *value-init-dirichlet-add* shows utterance that will be heard by the biased population. For example, it is possible to make 10% random agents listen 5 times (*init-dirichlet-add*) to the utterance $u_2$ (*value-init-dirichlet-add*). Thus, this value can take a number between 1 (for $u_1$) and *nb-of-categories* ($u_10$ in the context of this paper).
+
+#### CONTINUOUS
+
+ - *init-continuous-add* shows the number of utterance that will be heard by the agents before starting communication.
+ - *mean-continuous-init-add* shows the value of the utterance that will be heard. Please note that in this case, we keep the value of sd of the heard utterance fixed (it is selected by the user in *fixed-value-sd*). 
