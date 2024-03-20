@@ -1,10 +1,10 @@
 **Note on the files and folders**:
 
-- You can access the RMarkdown file used to generate the Supplementary Materials: check SupplementaryMaterials.Rmd file.
-- All figures from the Supplementary Materials are available in the Figures folder. The figures present in the paper were modified using Inkscape; you can find them in the "Inkscape" folder.
-- cached-results folder contains some analysis that took some time to generate, and help save time when running the SupplemetaryMaterials.Rmd file
-- Netlogo folder contains the Netlogo file used to generate the networks as well as an appendix to explain its functionalities
-- InputFiles contains the networks (raw and transformed)
+- You can access the RMarkdown file used to generate the Supplementary Materials: check `SupplementaryMaterials.Rmd` file.
+- All figures from the Supplementary Materials are available in the *Figures* folder. The figures present in the paper were modified using Inkscape; you can find them in the *Inkscape* folder.
+- *cached-results* folder contains some analysis that took some time to generate, and help save time when running the `SupplemetaryMaterials.Rmd` file
+- *Netlogo* folder contains the Netlogo file used to generate the networks as well as an appendix to explain its functionalities
+- *InputFiles* contains the networks (raw and transformed)
 
 **For replication:**
 
